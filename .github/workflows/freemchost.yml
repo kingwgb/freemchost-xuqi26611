@@ -1,0 +1,34 @@
+name: Freemchost Auto Renew Permanent
+
+on:
+  schedule:
+    # 每天在国际标准时间 04:00 和 16:00 各执行一次（规避由于面板时差导致的续期遗漏）
+    - cron: '0 4,16 * * *'
+  workflow_dispatch: # 允许你在 GitHub 页面上手动点击按钮强制触发
+
+jobs:
+  browser-auto-renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Playwright 核心依赖
+        run: |
+          npm init -y
+          npm install playwright
+
+      - name: 初始化 谷歌环境
+        run: npx playwright install chromium --with-deps
+
+      - name: 执行自动化续期脚本
+        env:
+          FREE_EMAIL: ${{ secrets.FREE_EMAIL }}
+          FREE_PASSWORD: ${{ secrets.FREE_PASSWORD }}
+          SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
+        run: node renew.js
