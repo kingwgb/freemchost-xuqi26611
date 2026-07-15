@@ -15,12 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 拉取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4[cite: 1]
 
       - name: 安装 Node.js 环境
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4[cite: 1]
         with:
-          node-version: '20'
+          node-version: '20'[cite: 1]
 
       - name: 安装 Playwright 核心依赖
         run: |
@@ -28,7 +28,7 @@ jobs:
           npm install playwright
 
       - name: 初始化 谷歌环境
-        run: npx playwright install chromium --with-deps
+        run: npx playwright install chromium --with-deps[cite: 1]
 
       - name: 执行自动化续期脚本
         env:
@@ -37,20 +37,32 @@ jobs:
           SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: node renew.js
+        run: node renew.js[cite: 1]
         
       - name: 📥 上传失败现场截图
         if: failure() 
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4[cite: 1]
         with:
           name: Error-Screenshot-Artifact
-          path: screenshots/*.png
+          path: screenshots/*.png[cite: 1]
 
-      - name: 🧹 自动清理旧的工作流运行记录
-        uses: Mattraiano/delete-workflow-runs@v2
-        if: always() # 保证无论前面成功还是失败，都必然会执行清理
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 0          # 保留0天的记录（即不按时间保留，完全由下面参数决定）
-          keep_minimum_runs: 1    # 仅保留当前最后一次运行记录
+      - name: 🧹 自动清理旧的工作流运行记录（官方原生方案）
+        if: always() # 保证无论前面成功还是失败，都必然会执行清理[cite: 1]
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "🚀 开始清理历史运行记录..."
+          # 获取当前工作流的所有历史运行 ID，排除当前正在运行的 ID[cite: 1]
+          RUN_IDS=$(gh run list --workflow "${{ github.workflow }}" --json databaseId --limit 100 -q '.[].databaseId' | grep -v "^${{ github.run_id }}$" || true)
+          
+          if [ -z "$RUN_IDS" ]; then
+            echo "✅ 没有发现其他历史运行记录，无需清理。"
+          else
+            echo "🔍 发现以下历史记录需要删除:"
+            echo "$RUN_IDS"
+            for run_id in $RUN_IDS; do
+              echo "🗑️ 正在删除历史运行记录 ID: $run_id"
+              gh run delete "$run_id" || echo "⚠️ 删除失败，跳过..."
+            done
+            echo "✨ 历史记录清理完成，仅保留当前运行记录！"
+          fi
