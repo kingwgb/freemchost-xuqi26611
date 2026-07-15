@@ -25,31 +25,6 @@ async function sendTG(message) {
   }
 }
 
-// 🕵️ 安全清理弹窗函数（外科手术式精准点击）
-async function dismissPopups(page) {
-  console.log('🕵️ 开始检测并清理屏幕上的连环拦截弹窗...');
-  // 循环 3 次，对付连环弹出的不同弹窗
-  for (let i = 0; i < 3; i++) {
-    try {
-      // 定位包含 "Maybe later" 的按钮，不强制精确匹配，兼容性更好
-      const maybeLaterBtn = page.getByText('Maybe later').first();
-      // 每次最多等 2.5 秒，看看有没有弹窗冒头
-      await maybeLaterBtn.waitFor({ state: 'visible', timeout: 2500 });
-      
-      console.log(`👋 发现第 ${i + 1} 个弹窗，正在点击 "Maybe later" 关闭...`);
-      await maybeLaterBtn.click();
-      
-      // 等待弹窗动画彻底消失
-      await maybeLaterBtn.waitFor({ state: 'hidden', timeout: 2000 });
-      await page.waitForTimeout(500); 
-    } catch (e) {
-      // 如果超时没发现 "Maybe later"，说明当前没有弹窗，安全退出循环
-      break;
-    }
-  }
-  console.log('✅ 弹窗清理完毕，环境安全！');
-}
-
 (async () => {
   // 确保截图保存目录存在
   const screenshotDir = path.join(__dirname, 'screenshots');
@@ -74,27 +49,72 @@ async function dismissPopups(page) {
     await page.locator('input[type="password"]').fill(process.env.FREE_PASSWORD);
     
     console.log('🔐 正在尝试登录...');
-    await page.locator('button:has-text("Sign in")').click();
-    
-    console.log('⏳ 等待登录跳转...');
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
-    console.log('✅ 登录成功！');
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    // Freemchost 可能使用 SPA 登录，登录成功后 URL 不一定立即变化，
+    // 因此不再把 waitForURL / waitForNavigation 作为唯一成功条件。
+    console.log('⏳ 等待登录结果...');
+    const loginResult = await Promise.race([
+      page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 }).then(() => 'form-hidden'),
+      page.getByText(/sign out/i).first().waitFor({ state: 'visible', timeout: 45000 }).then(() => 'signed-in'),
+      page.waitForURL(url => !url.pathname.includes('/login'), { waitUntil: 'domcontentloaded', timeout: 45000 }).then(() => 'url-changed')
+    ]).catch(() => null);
+
+    if (!loginResult) {
+      const loginError = await page.locator('[role="alert"], .alert, .error, [class*="error"]').allInnerTexts().catch(() => []);
+      throw new Error(`登录结果等待超时。当前 URL: ${page.url()}${loginError.length ? `；页面提示: ${loginError.join(' | ')}` : ''}`);
+    }
+    console.log(`✅ 登录成功！检测方式: ${loginResult}，当前 URL: ${page.url()}`);
 
     console.log('📂 正在直达服务器详情页...');
-    await page.goto(process.env.SERVER_PAGE_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    const detailResponse = await page.goto(process.env.SERVER_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    if (detailResponse && !detailResponse.ok()) {
+      throw new Error(`服务器详情页加载失败，HTTP 状态: ${detailResponse.status()}`);
+    }
+    await page.waitForTimeout(2500);
+
+    console.log('🕵️ 正在检测并关闭 Trustpilot 弹窗...');
+    for (let i = 0; i < 3; i += 1) {
+      const closers = [
+        page.getByText('Maybe later', { exact: true }),
+        page.getByRole('button', { name: /maybe later|close|dismiss/i }),
+        page.locator('[aria-label*="close" i]'),
+        page.locator('button').filter({ hasText: /^\s*[×✕✖]\s*$/ })
+      ];
+      let closed = false;
+      for (const closer of closers) {
+        const button = closer.first();
+        if (await button.isVisible({ timeout: 800 }).catch(() => false)) {
+          await button.click({ timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(700);
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) break;
+    }
+    await page.keyboard.press('Escape').catch(() => {});
 
     console.log('🗂️ 正在切换到 [Manage] 标签页...');
-    const manageTab = page.getByText('Manage').first();
-    
-    // 1. 先等待 Manage 标签在 DOM 中挂载完成（即使被弹窗挡住也会成功）
-    await manageTab.waitFor({ state: 'attached', timeout: 15000 });
-
-    // 2. 此时页面已加载，立刻执行精准弹窗清理
-    await dismissPopups(page);
-
-    // 3. 清理干净后，安全点击 Manage 标签
-    await manageTab.click({ timeout: 10000 });
-    console.log('✅ 已成功点击 [Manage] 标签！');
+    const manageCandidates = [
+      page.getByRole('tab', { name: /^Manage$/i }),
+      page.getByRole('link', { name: /^Manage$/i }),
+      page.getByRole('button', { name: /^Manage$/i }),
+      page.getByText(/^\s*Manage\s*$/i)
+    ];
+    let manageClicked = false;
+    for (const candidate of manageCandidates) {
+      const manageTab = candidate.first();
+      if (await manageTab.isVisible({ timeout: 2500 }).catch(() => false)) {
+        await manageTab.scrollIntoViewIfNeeded();
+        await manageTab.click({ timeout: 10000 });
+        manageClicked = true;
+        break;
+      }
+    }
+    if (!manageClicked) {
+      throw new Error(`找不到可见的 Manage 标签。当前 URL: ${page.url()}`);
+    }
 
     await page.waitForTimeout(2000);
 
@@ -107,13 +127,13 @@ async function dismissPopups(page) {
       await renewBtn.click();
       console.log('🎉 【成功】已精准点击续期按钮！');
       
-      // 调用 TG 发送成功通知！
+      // 🚨 新增：调用 TG 发送成功通知！
       await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> GitHub 机器人已成功登录并点击续期按钮。\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       
       await page.waitForTimeout(5000);
     } else {
       console.log('⚠️ 未找到续期按钮，可能已被续期，或者页面结构有变。');
-      // 调用 TG 发送跳过通知
+      // 🚨 新增：调用 TG 发送跳过通知
       await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 页面上未找到 Renew now 按钮，可能时间未到或页面变动。`);
     }
 
@@ -130,8 +150,8 @@ async function dismissPopups(page) {
       console.error('❌ 截图保存失败:', screenshotError.message);
     }
     
-    // 调用 TG 发送失败报警！
-    await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本已异常退出，请前往 GitHub Actions 页面下载现场截图！`);
+    // 🚨 新增：调用 TG 发送失败报警！
+    await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本已异常退出，请前往 GitHub Actions 页面下载案发现场截图！`);
     
     process.exit(1);
   } finally {
