@@ -26,38 +26,70 @@ async function sendTG(message) {
 }
 
 (async () => {
-  // 确保截图保存目录存在
   const screenshotDir = path.join(__dirname, 'screenshots');
   if (!fs.existsSync(screenshotDir)) {
     fs.mkdirSync(screenshotDir);
   }
 
-  // 获取并配置代理
   const proxyUrl = process.env.PROXY_URL;
   const nodeLink = process.env.NODE_LINK;
-  let launchOptions = { headless: true };
+  let currentProxy = null;
+  let isUsingProxy = false;
   
   if (nodeLink && nodeLink.trim() !== '') {
-    // 配合工作流中的 Mihomo 转换内核，固定走 7891 端口
-    launchOptions.proxy = { server: 'socks5://127.0.0.1:7891' };
-    console.log(`🌐 识别到 NODE_LINK，已启用 Mihomo 代理内核接管网络。`);
+    currentProxy = 'socks5://127.0.0.1:7891';
   } else if (proxyUrl && proxyUrl.trim() !== '') {
-    launchOptions.proxy = { server: proxyUrl.trim() };
-    console.log(`🌐 已启用传统 HTTP/SOCKS5 代理: ${proxyUrl.trim()}`);
-  } else {
-    console.log(`🌐 未配置任何代理变量，将使用直连运行。`);
+    currentProxy = proxyUrl.trim();
   }
 
-  // 启动无头浏览器
-  const browser = await chromium.launch(launchOptions);
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-  });
-  const page = await context.newPage();
+  let browser;
+  let context;
+  let page;
+
+  // 封装浏览器初始化函数
+  async function initBrowser(proxyServer) {
+    let launchOptions = { headless: true };
+    if (proxyServer) {
+      launchOptions.proxy = { server: proxyServer };
+      isUsingProxy = true;
+    } else {
+      isUsingProxy = false;
+    }
+    browser = await chromium.launch(launchOptions);
+    context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    });
+    page = await context.newPage();
+  }
 
   try {
+    // 1. 尝试携带代理启动
+    if (currentProxy) {
+      console.log(`🌐 尝试使用代理接管网络: ${currentProxy}`);
+      await initBrowser(currentProxy);
+      try {
+        console.log('📡 正在测试代理连通性...');
+        await page.goto('https://freemchost.com/login', { timeout: 15000 });
+        console.log('✅ 代理连通性测试通过！');
+      } catch (e) {
+        if (e.message.includes('ERR_PROXY_CONNECTION_FAILED') || e.message.includes('timeout') || e.message.includes('ERR_CONNECTION_CLOSED')) {
+          console.log(`⚠️ 代理连接失败 (${e.message.split('\n')[0]})！节点可能已失效。`);
+          console.log('🔄 触发双重保险：正在销毁当前浏览器，回退至【直连模式】继续运行...');
+          await browser.close();
+          await initBrowser(null); // 回退到无代理直连
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      console.log(`🌐 未配置代理，直接使用直连运行。`);
+      await initBrowser(null);
+    }
+
+    // 2. 正式开始执行流程
     console.log('🚀 正在打开 Freemchost 登录页面...');
-    await page.goto('https://new.freemchost.com/login', { waitUntil: 'networkidle', timeout: 60000 }); 
+    // 使用新版域名
+    await page.goto('https://freemchost.com/login', { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
 
     console.log('📝 正在输入账号密码...');
     await page.waitForSelector('input[type="email"]', { timeout: 15000 });
@@ -65,89 +97,37 @@ async function sendTG(message) {
     await page.locator('input[type="password"]').fill(process.env.FREE_PASSWORD);
     
     console.log('🔐 正在尝试登录...');
-    await page.getByRole('button', { name: /sign in/i }).click();
+    await page.getByRole('button', { name: /sign in|login/i }).click();
 
-    console.log('⏳ 等待登录结果...');
+    console.log('⏳ 等待登录结果并跳转控制台...');
     const loginResult = await Promise.race([
-      page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 }).then(() => 'form-hidden'),
-      page.getByText(/sign out/i).first().waitFor({ state: 'visible', timeout: 45000 }).then(() => 'signed-in'),
-      page.waitForURL(url => !url.pathname.includes('/login'), { waitUntil: 'domcontentloaded', timeout: 45000 }).then(() => 'url-changed')
+      page.waitForURL(url => url.pathname.includes('/app'), { waitUntil: 'domcontentloaded', timeout: 45000 }).then(() => 'url-changed'),
+      page.locator('text="A server is about to expire"').waitFor({ state: 'visible', timeout: 45000 }).then(() => 'dashboard-loaded')
     ]).catch(() => null);
 
     if (!loginResult) {
-      const loginError = await page.locator('[role="alert"], .alert, .error, [class*="error"]').allInnerTexts().catch(() => []);
-      throw new Error(`登录结果等待超时。当前 URL: ${page.url()}${loginError.length ? `；页面提示: ${loginError.join(' | ')}` : ''}`);
+      throw new Error(`登录超时或未成功跳转到 /app 首页。当前 URL: ${page.url()}`);
     }
-    console.log(`✅ 登录成功！检测方式: ${loginResult}，当前 URL: ${page.url()}`);
-
-    console.log('📂 正在直达服务器详情页...');
-    const detailResponse = await page.goto(process.env.SERVER_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    if (detailResponse && !detailResponse.ok()) {
-      throw new Error(`服务器详情页加载失败，HTTP 状态: ${detailResponse.status()}`);
-    }
-    await page.waitForTimeout(2500);
-
-    console.log('🕵️ 正在检测并关闭 Trustpilot 弹窗...');
-    for (let i = 0; i < 3; i += 1) {
-      const closers = [
-        page.getByText('Maybe later', { exact: true }),
-        page.getByRole('button', { name: /maybe later|close|dismiss/i }),
-        page.locator('[aria-label*="close" i]'),
-        page.locator('button').filter({ hasText: /^\s*[×✕✖]\s*$/ })
-      ];
-      let closed = false;
-      for (const closer of closers) {
-        const button = closer.first();
-        if (await button.isVisible({ timeout: 800 }).catch(() => false)) {
-          await button.click({ timeout: 5000 }).catch(() => {});
-          await page.waitForTimeout(700);
-          closed = true;
-          break;
-        }
-      }
-      if (!closed) break;
-    }
-    await page.keyboard.press('Escape').catch(() => {});
-
-    console.log('🗂️ 正在切换到 [Manage] 标签页...');
-    const manageCandidates = [
-      page.getByRole('tab', { name: /^Manage$/i }),
-      page.getByRole('link', { name: /^Manage$/i }),
-      page.getByRole('button', { name: /^Manage$/i }),
-      page.getByText(/^\s*Manage\s*$/i)
-    ];
-    let manageClicked = false;
-    for (const candidate of manageCandidates) {
-      const manageTab = candidate.first();
-      if (await manageTab.isVisible({ timeout: 2500 }).catch(() => false)) {
-        await manageTab.scrollIntoViewIfNeeded();
-        await manageTab.click({ timeout: 10000 });
-        manageClicked = true;
-        break;
-      }
-    }
-    if (!manageClicked) {
-      throw new Error(`找不到可见的 Manage 标签。当前 URL: ${page.url()}`);
-    }
-
-    await page.waitForTimeout(2000);
-
-    console.log('🔍 正在寻觅红色的 [Renew now] 按钮...');
-    const renewBtn = page.locator('button:has-text("Renew now")').last();
+    console.log(`✅ 成功进入控制台面板！当前 URL: ${page.url()}`);
     
-    await renewBtn.waitFor({ state: 'visible', timeout: 10000 });
+    await page.waitForTimeout(3000); // 稍微等待数据渲染
+
+    // 3. 匹配新版 UI 的续期按钮 (直接在首页操作)
+    console.log('🔍 正在首页寻觅 [Renew] 续期按钮...');
+    // 匹配页面上包含 "Renew" 文本的按钮（适应你截图中的红色 Renew -> 按钮）
+    const renewBtn = page.locator('button:has-text("Renew"), a:has-text("Renew")').first();
     
-    if (await renewBtn.isVisible()) {
+    if (await renewBtn.isVisible({ timeout: 10000 })) {
       await renewBtn.click();
-      console.log('🎉 【成功】已精准点击续期按钮！');
+      console.log('🎉 【成功】已精准点击首页的 Renew 按钮！');
       
-      const ipStatus = nodeLink ? '通过 NODE_LINK 代理' : (proxyUrl ? '通过 PROXY_URL 代理' : '未开启代理');
-      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> GitHub 机器人已成功登录并点击续期按钮。\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式 (触发降级或未配置)';
+      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 脚本已成功适应新版 UI 并点击续期按钮。\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       
       await page.waitForTimeout(5000);
     } else {
-      console.log('⚠️ 未找到续期按钮，可能已被续期，或者页面结构有变。');
-      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 页面上未找到 Renew now 按钮，可能时间未到或页面变动。`);
+      console.log('⚠️ 首页未找到 Renew 按钮，可能已被续期，或者还未到期。');
+      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> /app 面板上未找到 Renew 按钮，可能时间未到或已续期。`);
     }
 
   } catch (error) {
@@ -167,7 +147,9 @@ async function sendTG(message) {
     
     process.exit(1);
   } finally {
-    await browser.close();
-    console.log('🏁 浏览器已关闭，任务结束。');
+    if (browser) {
+      await browser.close();
+      console.log('🏁 浏览器已关闭，任务结束。');
+    }
   }
 })();
