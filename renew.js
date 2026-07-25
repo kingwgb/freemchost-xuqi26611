@@ -32,8 +32,24 @@ async function sendTG(message) {
     fs.mkdirSync(screenshotDir);
   }
 
+  // 获取并配置代理
+  const proxyUrl = process.env.PROXY_URL;
+  const nodeLink = process.env.NODE_LINK;
+  let launchOptions = { headless: true };
+  
+  if (nodeLink && nodeLink.trim() !== '') {
+    // 配合工作流中的 Mihomo 转换内核，固定走 7891 端口
+    launchOptions.proxy = { server: 'socks5://127.0.0.1:7891' };
+    console.log(`🌐 识别到 NODE_LINK，已启用 Mihomo 代理内核接管网络。`);
+  } else if (proxyUrl && proxyUrl.trim() !== '') {
+    launchOptions.proxy = { server: proxyUrl.trim() };
+    console.log(`🌐 已启用传统 HTTP/SOCKS5 代理: ${proxyUrl.trim()}`);
+  } else {
+    console.log(`🌐 未配置任何代理变量，将使用直连运行。`);
+  }
+
   // 启动无头浏览器
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
   });
@@ -51,8 +67,6 @@ async function sendTG(message) {
     console.log('🔐 正在尝试登录...');
     await page.getByRole('button', { name: /sign in/i }).click();
 
-    // Freemchost 可能使用 SPA 登录，登录成功后 URL 不一定立即变化，
-    // 因此不再把 waitForURL / waitForNavigation 作为唯一成功条件。
     console.log('⏳ 等待登录结果...');
     const loginResult = await Promise.race([
       page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 }).then(() => 'form-hidden'),
@@ -127,13 +141,12 @@ async function sendTG(message) {
       await renewBtn.click();
       console.log('🎉 【成功】已精准点击续期按钮！');
       
-      // 🚨 新增：调用 TG 发送成功通知！
-      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> GitHub 机器人已成功登录并点击续期按钮。\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      const ipStatus = nodeLink ? '通过 NODE_LINK 代理' : (proxyUrl ? '通过 PROXY_URL 代理' : '未开启代理');
+      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> GitHub 机器人已成功登录并点击续期按钮。\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       
       await page.waitForTimeout(5000);
     } else {
       console.log('⚠️ 未找到续期按钮，可能已被续期，或者页面结构有变。');
-      // 🚨 新增：调用 TG 发送跳过通知
       await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 页面上未找到 Renew now 按钮，可能时间未到或页面变动。`);
     }
 
@@ -150,7 +163,6 @@ async function sendTG(message) {
       console.error('❌ 截图保存失败:', screenshotError.message);
     }
     
-    // 🚨 新增：调用 TG 发送失败报警！
     await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本已异常退出，请前往 GitHub Actions 页面下载案发现场截图！`);
     
     process.exit(1);
