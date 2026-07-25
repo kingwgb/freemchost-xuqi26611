@@ -5,10 +5,18 @@ on:
     - cron: '10 3 * * *'
   workflow_dispatch:
 
+# 必须添加 actions: write 权限，否则无法删除旧工作流
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   browser-auto-renew:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # 在 Job 级别加载节点变量供后续判定
+    env:
+      NODE_LINK: ${{ secrets.NODE_LINK }}
 
     steps:
       - name: 拉取代码
@@ -25,6 +33,35 @@ jobs:
           npm install playwright
           npx playwright install chromium --with-deps
 
+      - name: ⚙️ 部署 Mihomo 代理内核 (解析 vless/vmess/tuic/hy2 等原生节点)
+        if: ${{ env.NODE_LINK != '' }}
+        run: |
+          echo "🔄 识别到 NODE_LINK，开始部署本地代理转换层..."
+          
+          # 1. 保存节点链接并启动临时本地服务供转换器读取
+          echo "$NODE_LINK" > node.txt
+          python3 -m http.server 8080 &
+          
+          # 2. 下载 Subconverter 节点解析器 (全本地运行，无节点泄露风险)
+          wget -qO sub.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz
+          tar -xf sub.tar.gz
+          nohup ./subconverter/subconverter > sub.log 2>&1 &
+          sleep 2
+          
+          # 3. 下载 Mihomo (原 Clash Meta) 内核支持全协议
+          wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.2/mihomo-linux-amd64-v1.18.2.gz
+          gunzip mihomo.gz
+          chmod +x mihomo
+          
+          # 4. 生成配置文件 (固定开启 7891 SOCKS5 端口)
+          curl -s "http://127.0.0.1:25500/sub?target=clash&url=http://127.0.0.1:8080/node.txt&insert=false" > config.yaml
+          sed -i '1i\socks-port: 7891\nallow-lan: true\nmode: global' config.yaml
+          
+          # 5. 后台启动代理内核
+          nohup ./mihomo -d . -f config.yaml > mihomo.log 2>&1 &
+          sleep 3
+          echo "✅ 代理内核启动完毕！已为你桥接本地 SOCKS5: 127.0.0.1:7891"
+
       - name: 执行自动化续期脚本
         env:
           FREE_EMAIL: ${{ secrets.FREE_EMAIL }}
@@ -32,6 +69,7 @@ jobs:
           SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }} # 兼容老写法
         run: node renew.js
 
       - name: 上传运行截图
@@ -42,3 +80,12 @@ jobs:
           path: screenshots/*.png
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: 🧹 删除旧的工作流记录 (只保留当前最新记录)
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0      
+          keep_minimum_runs: 1
