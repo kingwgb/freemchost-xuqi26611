@@ -114,40 +114,48 @@ async function sendTG(message) {
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
     await page.waitForTimeout(3000);
 
-    // 4. 🚨【暴力强行拔除 Trustpilot 评价弹窗】
-    console.log('💥 正在强行注入 JS 摧毁 Trustpilot 评价弹窗及背景遮罩...');
+    // 4. 🚨【通用弹窗通用干掉机制】(无论 Discord / Trustpilot 还是其他营销弹窗)
+    console.log('💥 正在扫描并强行踢飞干扰弹窗 (Discord / Trustpilot 等)...');
     
+    // 方案 A: 模拟点击 "Maybe later" 按钮
+    for (let i = 0; i < 3; i++) {
+      const maybeBtn = page.getByText('Maybe later', { exact: false }).first();
+      if (await maybeBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await maybeBtn.click({ force: true }).catch(() => {});
+        console.log(`🎉 成功点击 "Maybe later" 关闭干扰弹窗 (第 ${i+1} 次)！`);
+        await page.waitForTimeout(1000);
+      } else {
+        break;
+      }
+    }
+
+    // 方案 B: 注入 JS 从 DOM 层面彻底将遮罩与弹窗彻底抹除
     await page.evaluate(() => {
-      // 找到含有 Trustpilot / Enjoying FreeMCHost 文字的任何 DOM 节点
-      const elements = Array.from(document.querySelectorAll('*'));
-      for (const el of elements) {
-        if (el.children.length === 0 && el.textContent && (el.textContent.includes('Trustpilot') || el.textContent.includes('Enjoying FreeMCHost') || el.textContent.includes('Maybe later'))) {
-          // 向上找到最外层的 modal 容器节点
-          let container = el;
-          for (let i = 0; i < 6; i++) {
-            if (container.parentElement && container.parentElement !== document.body) {
-              container = container.parentElement;
-              const style = window.getComputedStyle(container);
-              if (style.position === 'fixed' || style.position === 'absolute' || container.getAttribute('role') === 'dialog') {
-                break;
+      const keywords = ['Maybe later', 'Discord', 'Trustpilot', 'Enjoying FreeMCHost', 'Join the FreeMCHost community', 'community'];
+      
+      // 遍历 DOM 节点找到包含关键字的弹窗外框并 remove
+      const allElements = Array.from(document.querySelectorAll('*'));
+      for (const el of allElements) {
+        if (el.children.length === 0 && el.textContent) {
+          const matched = keywords.some(kw => el.textContent.includes(kw));
+          if (matched) {
+            let container = el;
+            for (let i = 0; i < 8; i++) {
+              if (container.parentElement && container.parentElement !== document.body) {
+                container = container.parentElement;
+                const style = window.getComputedStyle(container);
+                if (style.position === 'fixed' || style.position === 'absolute' || container.getAttribute('role') === 'dialog') {
+                  container.remove();
+                  break;
+                }
               }
             }
-          }
-          // 直接将整个弹窗容器从 DOM 树中移除！
-          if (container && container !== document.body) {
-            container.remove();
           }
         }
       }
 
-      // 清理残留的半透明背景遮罩层
-      const allDivs = Array.from(document.querySelectorAll('div'));
-      for (const div of allDivs) {
-        const style = window.getComputedStyle(div);
-        if (style.position === 'fixed' && (style.backgroundColor.includes('rgba') || style.backdropFilter !== 'none')) {
-          div.remove();
-        }
-      }
+      // 移除通用 dialog / modal / overlay 节点
+      document.querySelectorAll('[role="dialog"], [aria-modal="true"]').forEach(el => el.remove());
     }).catch(() => {});
 
     await page.keyboard.press('Escape').catch(() => {});
@@ -181,7 +189,7 @@ async function sendTG(message) {
         await page.waitForTimeout(5000); // 等待网络提交完成
         
         const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已强制干掉遮挡弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动踢飞干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       } else {
         console.log('⚠️ 未能定位到 [48 hours] 选项，存图排查...');
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
