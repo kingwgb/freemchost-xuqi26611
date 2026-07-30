@@ -58,9 +58,46 @@ async function sendTG(message) {
       isUsingProxy = false;
     }
     browser = await chromium.launch(launchOptions);
+    
     context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
+
+    // 🚨【核心武器】注入实时 DOM 监听器：一旦弹窗生成，0.01秒内自动粉碎！
+    await context.addInitScript(() => {
+      const badKeywords = ['Maybe later', 'Discord', 'Trustpilot', 'Enjoying FreeMCHost', 'Join the FreeMCHost community'];
+      
+      const cleanBadModals = () => {
+        const elements = document.querySelectorAll('*');
+        elements.forEach(el => {
+          if (el.children.length === 0 && el.textContent) {
+            const text = el.textContent;
+            const isBad = badKeywords.some(kw => text.includes(kw));
+            // 确保绝对不误伤续期弹窗 (Keep your server online)
+            if (isBad && !document.body.innerText.includes('Keep your server online')) {
+              let target = el;
+              for (let i = 0; i < 8; i++) {
+                if (target.parentElement && target.parentElement !== document.body) {
+                  target = target.parentElement;
+                  const pos = window.getComputedStyle(target).position;
+                  if (pos === 'fixed' || pos === 'absolute' || target.getAttribute('role') === 'dialog') {
+                    target.remove();
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        });
+      };
+
+      // 创建 DOM 变动监听器
+      const observer = new MutationObserver(() => cleanBadModals());
+      window.addEventListener('DOMContentLoaded', () => {
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+    });
+
     page = await context.newPage();
   }
 
@@ -112,59 +149,22 @@ async function sendTG(message) {
     console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
     await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
-    await page.waitForTimeout(3000);
-
-    // 4. 🚨【通用弹窗通用干掉机制】(无论 Discord / Trustpilot 还是其他营销弹窗)
-    console.log('💥 正在扫描并强行踢飞干扰弹窗 (Discord / Trustpilot 等)...');
     
-    // 方案 A: 模拟点击 "Maybe later" 按钮
-    for (let i = 0; i < 3; i++) {
+    // 4. 轮询清理弹窗兜底 (防延迟渲染)
+    console.log('🛡️ 激活防遮挡双重清理防护...');
+    for (let i = 0; i < 5; i++) {
       const maybeBtn = page.getByText('Maybe later', { exact: false }).first();
-      if (await maybeBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      if (await maybeBtn.isVisible({ timeout: 600 }).catch(() => false)) {
         await maybeBtn.click({ force: true }).catch(() => {});
-        console.log(`🎉 成功点击 "Maybe later" 关闭干扰弹窗 (第 ${i+1} 次)！`);
-        await page.waitForTimeout(1000);
-      } else {
-        break;
+        console.log('🎉 手动补刀：成功点击 "Maybe later"！');
       }
+      await page.waitForTimeout(500);
     }
-
-    // 方案 B: 注入 JS 从 DOM 层面彻底将遮罩与弹窗彻底抹除
-    await page.evaluate(() => {
-      const keywords = ['Maybe later', 'Discord', 'Trustpilot', 'Enjoying FreeMCHost', 'Join the FreeMCHost community', 'community'];
-      
-      // 遍历 DOM 节点找到包含关键字的弹窗外框并 remove
-      const allElements = Array.from(document.querySelectorAll('*'));
-      for (const el of allElements) {
-        if (el.children.length === 0 && el.textContent) {
-          const matched = keywords.some(kw => el.textContent.includes(kw));
-          if (matched) {
-            let container = el;
-            for (let i = 0; i < 8; i++) {
-              if (container.parentElement && container.parentElement !== document.body) {
-                container = container.parentElement;
-                const style = window.getComputedStyle(container);
-                if (style.position === 'fixed' || style.position === 'absolute' || container.getAttribute('role') === 'dialog') {
-                  container.remove();
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // 移除通用 dialog / modal / overlay 节点
-      document.querySelectorAll('[role="dialog"], [aria-modal="true"]').forEach(el => el.remove());
-    }).catch(() => {});
-
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(1500);
 
     // 5. 点击右下角 [Renew now]
     console.log('⏳ 正在等待右下角 [Renew now] 按钮...');
     const renewBtn = page.locator('button:has-text("Renew now"), button:has-text("Renew")').first();
-    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false);
+    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
 
     if (isReady) {
       await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
@@ -178,8 +178,8 @@ async function sendTG(message) {
       const optionTextFallback = page.getByText(/48\s*hours/i).first();
 
       const optionReady = await Promise.race([
-        optionCard.waitFor({ state: 'visible', timeout: 12000 }).then(() => optionCard),
-        optionTextFallback.waitFor({ state: 'visible', timeout: 12000 }).then(() => optionTextFallback)
+        optionCard.waitFor({ state: 'visible', timeout: 15000 }).then(() => optionCard),
+        optionTextFallback.waitFor({ state: 'visible', timeout: 15000 }).then(() => optionTextFallback)
       ]).catch(() => null);
 
       if (optionReady) {
@@ -189,7 +189,7 @@ async function sendTG(message) {
         await page.waitForTimeout(5000); // 等待网络提交完成
         
         const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动踢飞干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动消灭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       } else {
         console.log('⚠️ 未能定位到 [48 hours] 选项，存图排查...');
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
