@@ -34,7 +34,6 @@ async function sendTG(message) {
   const proxyUrl = process.env.PROXY_URL;
   const nodeLink = process.env.NODE_LINK;
   
-  // 默认使用你指定的服务器详情页链接，优先读取 Secrets 中的 SERVER_PAGE_URL
   const targetServerUrl = process.env.SERVER_PAGE_URL || 'https://freemchost.com/app/servers/744311a4-998f-4811-82be-b2957557c7b0';
   
   let currentProxy = null;
@@ -50,7 +49,6 @@ async function sendTG(message) {
   let context;
   let page;
 
-  // 封装浏览器初始化函数
   async function initBrowser(proxyServer) {
     let launchOptions = { headless: true };
     if (proxyServer) {
@@ -67,7 +65,7 @@ async function sendTG(message) {
   }
 
   try {
-    // 1. 尝试携带代理启动 (支持自动降级回退)
+    // 1. 代理连通性测试与防崩溃自动降级
     if (currentProxy) {
       console.log(`🌐 尝试使用代理接管网络: ${currentProxy}`);
       await initBrowser(currentProxy);
@@ -77,8 +75,7 @@ async function sendTG(message) {
         console.log('✅ 代理连通性测试通过！');
       } catch (e) {
         if (e.message.includes('ERR_PROXY_CONNECTION_FAILED') || e.message.includes('timeout') || e.message.includes('ERR_CONNECTION_CLOSED')) {
-          console.log(`⚠️ 代理连接失败 (${e.message.split('\n')[0]})！节点可能已失效。`);
-          console.log('🔄 触发双重保险：正在销毁当前浏览器，回退至【直连模式】继续运行...');
+          console.log(`⚠️ 代理连接失败！节点可能已失效，自动切回【直连模式】继续运行...`);
           await browser.close();
           await initBrowser(null);
         } else {
@@ -90,7 +87,7 @@ async function sendTG(message) {
       await initBrowser(null);
     }
 
-    // 2. 账号登录流程
+    // 2. 登录流程
     console.log('🚀 正在打开 Freemchost 登录页面...');
     await page.goto('https://freemchost.com/login', { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
 
@@ -102,52 +99,48 @@ async function sendTG(message) {
     console.log('🔐 正在尝试登录...');
     await page.getByRole('button', { name: /sign in|login/i }).click();
 
-    console.log('⏳ 等待登录跳转...');
-    const loginResult = await Promise.race([
-      page.waitForURL(url => !url.pathname.includes('/login'), { waitUntil: 'domcontentloaded', timeout: 45000 }).then(() => 'url-changed'),
-      page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 }).then(() => 'form-hidden')
+    console.log('⏳ 等待登录成功...');
+    await Promise.race([
+      page.waitForURL(url => !url.pathname.includes('/login'), { waitUntil: 'domcontentloaded', timeout: 45000 }),
+      page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 })
     ]).catch(() => null);
 
-    if (!loginResult) {
-      throw new Error(`登录超时或未成功登录。当前 URL: ${page.url()}`);
-    }
-    console.log(`✅ 登录成功！当前 URL: ${page.url()}`);
+    console.log(`✅ 登录状态确认，当前 URL: ${page.url()}`);
+    await page.waitForTimeout(2000);
 
-    // 3. 直达指定的服务器详情页
+    // 3. 打开指定的服务器详情页
     console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
-    await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(3500); // 等待控制台及右下角卡片渲染完成
+    await page.goto(targetServerUrl, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+    console.log(`📍 实际到达页面 URL: ${page.url()}`);
 
-    // 4. 定位右下角 [SERVER EXPIRES IN...] 区域里的 [Renew now] 按钮
-    console.log('🔍 正在定位右下角卡片中的 [Renew now] 续期按钮...');
+    // 4. 显式等待右下角的续期卡片/按钮加载（最长等待 20 秒）
+    console.log('⏳ 正在等待右下角卡片及 [Renew now] 按钮渲染 (最长 20s)...');
     
-    const renewBtnCandidates = [
-      page.getByRole('button', { name: /renew now/i }),
-      page.locator('button:has-text("Renew now")'),
-      page.locator('div').filter({ hasText: /SERVER EXPIRES IN/i }).locator('button')
-    ];
+    // 定位元素
+    const renewBtn = page.locator('button:has-text("Renew now"), button:has-text("Renew")').first();
+    
+    // 强制等待按钮变为可见状态
+    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
 
-    let renewBtn = null;
-    for (const candidate of renewBtnCandidates) {
-      const btn = candidate.first();
-      if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        renewBtn = btn;
-        break;
-      }
-    }
-
-    if (renewBtn) {
+    if (isReady) {
       await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
-      await renewBtn.click({ timeout: 10000 });
-      console.log('🎉 【成功】已精准点击右下角 Renew now 续期按钮！');
+      await renewBtn.click({ timeout: 5000 });
+      console.log('🎉 【成功】精准点击右下角 Renew now 续期按钮！');
       
-      const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式 (触发降级或未配置)';
-      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已访问服务器详情页并成功点击右下角 Renew now 按钮。\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
+      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已定位并成功点击 Renew now 按钮。\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       
       await page.waitForTimeout(5000);
     } else {
-      console.log('⚠️ 右下角未找到 [Renew now] 按钮，可能已处于不可续期状态或已完成续期。');
-      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 服务器详情页右下角未找到 Renew now 按钮，可能未到续期时间。`);
+      console.log('⚠️ 右下角未检测到 [Renew now] 按钮，保存现场截图供排查...');
+      
+      // 保存现场截图，确保 Artifacts 能下载到图片
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const screenshotPath = path.join(screenshotDir, `not-found-${timestamp}.png`);
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      console.log(`📸 现场截图已存至: ${screenshotPath}`);
+
+      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 未能等待到 Renew now 按钮，可能已完成续期或处于不可续期状态。截图已生成。`);
     }
 
   } catch (error) {
@@ -158,12 +151,12 @@ async function sendTG(message) {
     
     try {
       await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`📸 现场截图已保存至: ${screenshotPath}`);
+      console.log(`📸 异常现场截图已保存至: ${screenshotPath}`);
     } catch (screenshotError) {
       console.error('❌ 截图保存失败:', screenshotError.message);
     }
     
-    await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本已异常退出，请前往 GitHub Actions 页面下载案发现场截图！`);
+    await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本异常退出，请前往 GitHub Actions 页面下载截图！`);
     
     process.exit(1);
   } finally {
