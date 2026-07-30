@@ -65,7 +65,7 @@ async function sendTG(message) {
   }
 
   try {
-    // 1. 代理连通性测试与自动降级
+    // 1. 代理测试与降级
     if (currentProxy) {
       console.log(`🌐 尝试使用代理接管网络: ${currentProxy}`);
       await initBrowser(currentProxy);
@@ -108,23 +108,49 @@ async function sendTG(message) {
     console.log(`✅ 登录成功！当前 URL: ${page.url()}`);
     await page.waitForTimeout(2000);
 
-    // 3. 进入服务器详情页
+    // 3. 直达服务器详情页
     console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
-    await page.goto(targetServerUrl, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+    await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
+    await page.waitForTimeout(2500);
 
-    // 4. 点击右下角 [Renew now] 触发二阶段弹窗
-    console.log('⏳ 正在等待右下角 [Renew now] 按钮渲染...');
+    // 4. 🚨【新增核心修复】自动识别并关闭 Trustpilot 评价弹窗及遮挡层
+    console.log('🕵️ 正在自动干掉 Trustpilot 评价弹窗遮挡...');
+    for (let i = 0; i < 3; i++) {
+      const closers = [
+        page.getByText('Maybe later', { exact: false }),
+        page.getByRole('button', { name: /maybe later|close|dismiss/i }),
+        page.locator('button').filter({ hasText: /^\s*[×✕✖]\s*$/ }),
+        page.locator('[aria-label*="close" i]')
+      ];
+      let closed = false;
+      for (const closer of closers) {
+        const btn = closer.first();
+        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await btn.click({ timeout: 3000 }).catch(() => {});
+          console.log('🎉 已成功踢飞 Trustpilot 弹窗！');
+          await page.waitForTimeout(800);
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) break;
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(1000);
+
+    // 5. 点击右下角 [Renew now]
+    console.log('⏳ 正在等待右下角 [Renew now] 按钮...');
     const renewBtn = page.locator('button:has-text("Renew now"), button:has-text("Renew")').first();
-    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
+    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false);
 
     if (isReady) {
       await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
       await renewBtn.click({ timeout: 5000 });
-      console.log('🎉 成功点击 [Renew now]，等待弹窗 [Keep your server online] 弹出...');
+      console.log('🎉 成功点击 [Renew now]，等待续期弹窗 [Keep your server online] 出现...');
 
-      // 5. 等待二次弹窗出现，并寻找 [48 hours] 选项
-      console.log('⏳ 正在寻觅弹窗中的 [48 hours] 免费续期选项...');
+      // 6. 等待续期弹窗并选择 [48 hours]
+      console.log('⏳ 正在寻觅弹窗中的 [48 hours] 免费续期卡片...');
       
       const optionCard = page.locator('div, button, article').filter({ hasText: /48\s*hours/i }).last();
       const optionTextFallback = page.getByText(/48\s*hours/i).first();
@@ -136,25 +162,23 @@ async function sendTG(message) {
 
       if (optionReady) {
         await optionReady.click({ timeout: 5000 });
-        console.log('🎉🎉【成功】已精准点击 [48 hours] 续期卡片！续期完成！');
+        console.log('🎉🎉【完美成功】已精准点击 [48 hours] 续期卡片！全流程完成！');
 
         await page.waitForTimeout(5000); // 等待网络提交完成
         
         const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已成功点击 [Renew now] 并选择 [48 hours] 选项完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动关闭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       } else {
-        console.log('⚠️ 弹窗未及时出现或未能定位到 [48 hours] 选项，截留现场照片...');
-        
+        console.log('⚠️ 未能定位到 [48 hours] 选项，存图排查...');
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const screenshotPath = path.join(screenshotDir, `modal-error-${timestamp}.png`);
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
 
-        await sendTG(`⚠️ <b>Freemchost 续期异常</b>\n\n<b>状态:</b> 已点击 Renew now，但弹窗中未寻到 48 hours 选项。现场截图已保存。`);
+        await sendTG(`⚠️ <b>Freemchost 续期异常</b>\n\n<b>状态:</b> 已点击 Renew now，但弹窗中未找到 48 hours 选项。截图已保存。`);
       }
 
     } else {
-      console.log('⚠️ 右下角未检测到 [Renew now] 按钮，保存现场截图...');
-      
+      console.log('⚠️ 依然未检测到 [Renew now] 按钮，保存现场截图...');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const screenshotPath = path.join(screenshotDir, `not-found-${timestamp}.png`);
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
