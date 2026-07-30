@@ -112,32 +112,46 @@ async function sendTG(message) {
     console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
     await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(3000);
 
-    // 4. 🚨【新增核心修复】自动识别并关闭 Trustpilot 评价弹窗及遮挡层
-    console.log('🕵️ 正在自动干掉 Trustpilot 评价弹窗遮挡...');
-    for (let i = 0; i < 3; i++) {
-      const closers = [
-        page.getByText('Maybe later', { exact: false }),
-        page.getByRole('button', { name: /maybe later|close|dismiss/i }),
-        page.locator('button').filter({ hasText: /^\s*[×✕✖]\s*$/ }),
-        page.locator('[aria-label*="close" i]')
-      ];
-      let closed = false;
-      for (const closer of closers) {
-        const btn = closer.first();
-        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
-          await btn.click({ timeout: 3000 }).catch(() => {});
-          console.log('🎉 已成功踢飞 Trustpilot 弹窗！');
-          await page.waitForTimeout(800);
-          closed = true;
-          break;
+    // 4. 🚨【暴力强行拔除 Trustpilot 评价弹窗】
+    console.log('💥 正在强行注入 JS 摧毁 Trustpilot 评价弹窗及背景遮罩...');
+    
+    await page.evaluate(() => {
+      // 找到含有 Trustpilot / Enjoying FreeMCHost 文字的任何 DOM 节点
+      const elements = Array.from(document.querySelectorAll('*'));
+      for (const el of elements) {
+        if (el.children.length === 0 && el.textContent && (el.textContent.includes('Trustpilot') || el.textContent.includes('Enjoying FreeMCHost') || el.textContent.includes('Maybe later'))) {
+          // 向上找到最外层的 modal 容器节点
+          let container = el;
+          for (let i = 0; i < 6; i++) {
+            if (container.parentElement && container.parentElement !== document.body) {
+              container = container.parentElement;
+              const style = window.getComputedStyle(container);
+              if (style.position === 'fixed' || style.position === 'absolute' || container.getAttribute('role') === 'dialog') {
+                break;
+              }
+            }
+          }
+          // 直接将整个弹窗容器从 DOM 树中移除！
+          if (container && container !== document.body) {
+            container.remove();
+          }
         }
       }
-      if (!closed) break;
-    }
+
+      // 清理残留的半透明背景遮罩层
+      const allDivs = Array.from(document.querySelectorAll('div'));
+      for (const div of allDivs) {
+        const style = window.getComputedStyle(div);
+        if (style.position === 'fixed' && (style.backgroundColor.includes('rgba') || style.backdropFilter !== 'none')) {
+          div.remove();
+        }
+      }
+    }).catch(() => {});
+
     await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     // 5. 点击右下角 [Renew now]
     console.log('⏳ 正在等待右下角 [Renew now] 按钮...');
@@ -146,7 +160,7 @@ async function sendTG(message) {
 
     if (isReady) {
       await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
-      await renewBtn.click({ timeout: 5000 });
+      await renewBtn.click({ timeout: 5000, force: true });
       console.log('🎉 成功点击 [Renew now]，等待续期弹窗 [Keep your server online] 出现...');
 
       // 6. 等待续期弹窗并选择 [48 hours]
@@ -161,13 +175,13 @@ async function sendTG(message) {
       ]).catch(() => null);
 
       if (optionReady) {
-        await optionReady.click({ timeout: 5000 });
+        await optionReady.click({ timeout: 5000, force: true });
         console.log('🎉🎉【完美成功】已精准点击 [48 hours] 续期卡片！全流程完成！');
 
         await page.waitForTimeout(5000); // 等待网络提交完成
         
         const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动关闭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已强制干掉遮挡弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       } else {
         console.log('⚠️ 未能定位到 [48 hours] 选项，存图排查...');
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
