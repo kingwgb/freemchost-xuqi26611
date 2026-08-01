@@ -23,27 +23,41 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 智能自动扫除营销/反馈类干扰弹窗 (如 Got an idea / Trustpilot 等)
-async function clearMarketingPopups(page) {
-  const dismissTargets = [
-    'text="Maybe later"',
-    'button:has-text("Maybe later")',
-    'text="I need help"',
-    'button:has-text("I need help")'
-  ];
+// 🛡️ 浏览器原生 JS 强行关/删干扰弹窗
+async function forceDismissPopups(page) {
+  console.log('🛡️ 正在执行 DOM 级弹窗粉碎策略...');
+  
+  // 1. 发送 Esc 键盘事件
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(500);
 
-  for (let i = 0; i < 3; i++) { // 循环扫 3 次，防止延迟弹出的遮罩
-    for (const target of dismissTargets) {
-      try {
-        const btn = page.locator(target).first();
-        if (await btn.isVisible({ timeout: 1000 })) {
-          console.log(`💥 发现营销/反馈干扰弹窗，正在点击 [${target}] 关闭...`);
-          await btn.click({ force: true });
-          await page.waitForTimeout(1000);
+  // 2. 注入 JS 在页面内部强行点击或删除弹窗
+  await page.evaluate(() => {
+    // A. 寻找 "Maybe later" / "I need help" 并直接触发底层 click
+    const allEls = Array.from(document.querySelectorAll('*'));
+    const targets = allEls.filter(el => 
+      el.children.length === 0 && 
+      (el.textContent.trim().toLowerCase() === 'maybe later' || el.textContent.trim().toLowerCase() === 'i need help')
+    );
+    targets.forEach(el => el.click());
+
+    // B. 如果弹窗依然存在，直接从 DOM 中擦除 Got an idea 弹窗整个容器
+    const ideaHeader = allEls.find(el => el.textContent && el.textContent.includes('Got an idea to make FreeMCHost better'));
+    if (ideaHeader) {
+      let modalContainer = ideaHeader;
+      // 向上寻找最外层 modal 节点
+      for (let i = 0; i < 5; i++) {
+        if (modalContainer.parentElement && modalContainer.parentElement !== document.body) {
+          modalContainer = modalContainer.parentElement;
         }
-      } catch (e) {}
+      }
+      if (modalContainer && modalContainer !== document.body) {
+        modalContainer.remove(); // 强行移除节点
+      }
     }
-  }
+  });
+
+  await page.waitForTimeout(1000);
 }
 
 (async () => {
@@ -78,7 +92,7 @@ async function clearMarketingPopups(page) {
     locale: 'en-US'
   });
 
-  // 抹除自动化痕迹
+  // 抹除自动化特征
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
@@ -108,24 +122,42 @@ async function clearMarketingPopups(page) {
     console.log('📍 实际到达页面 URL:', page.url());
     await page.waitForTimeout(3000);
 
-    // 1. 扫除可能挡住屏幕的广告/反馈弹窗
-    console.log('🛡️ 检查并扫除干扰弹窗...');
-    await clearMarketingPopups(page);
+    // 1. 强行清理遮罩弹窗
+    await forceDismissPopups(page);
 
-    // 2. 寻找主页面的 [Renew now] 按钮
-    console.log('🔄 正在寻找 [Renew now] 按钮...');
-    const renewBtn = page.locator('button:has-text("Renew now"), a:has-text("Renew now"), *:has-text("Renew now")').last();
+    // 2. 点击 [Renew now] 按钮（通过 JS 寻找并触发点击，免疫遮罩挡路）
+    console.log('🔄 正在寻找并点击 [Renew now] 按钮...');
     
-    // 如果还被遮挡，再次强行扫除一次弹窗
-    await clearMarketingPopups(page);
+    // 如果一次点击没触发，做二次清洗与重试
+    let renewClicked = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      renewClicked = await page.evaluate(() => {
+        const allBtns = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+        const target = allBtns.find(b => b.textContent && b.textContent.trim().toLowerCase().includes('renew now'));
+        if (target) {
+          target.click();
+          return true;
+        }
+        return false;
+      });
 
-    await renewBtn.waitFor({ state: 'visible', timeout: 30000 });
-    console.log('👉 找到 [Renew now] 按钮，点击中...');
-    await renewBtn.click({ force: true });
+      if (renewClicked) {
+        console.log('👉 已通过 JS 成功触发 [Renew now] 点击！');
+        break;
+      }
+      
+      console.log(`⏳ 第 ${attempt + 1} 次尝试未查找到按钮，再次扫除干扰弹窗后重试...`);
+      await forceDismissPopups(page);
+      await page.waitForTimeout(2000);
+    }
 
-    // 3. 等待真正的续期弹窗出现并点击 [48 hours]
+    if (!renewClicked) {
+      throw new Error('未能在页面找到 [Renew now] 按钮，请检查页面结构。');
+    }
+
+    // 3. 等待真正的 48 hours 续期弹窗出现
     console.log('📋 正在等待 48小时 续期选择弹窗...');
-    const hours48Option = page.locator('*:has-text("48 hours")').last();
+    const hours48Option = page.locator('text=/48 hours/i').first();
     await hours48Option.waitFor({ state: 'visible', timeout: 20000 });
 
     console.log('👉 成功捕获续期弹窗！点击 [48 hours] 选项...');
