@@ -71,6 +71,28 @@ async function sendTelegramMessage(botToken, chatId, text) {
     console.log('📂 正在直达服务器详情页:', targetUrl);
     await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
     console.log('📍 实际到达页面 URL:', page.url());
+    await page.waitForTimeout(3000); // 等待页面基础渲染
+
+    // 🛡️ 精准清理干扰弹窗 (只点 Maybe later，绝不碰续期选项)
+    console.log('🛡️ 正在扫描并清理好评/广告干扰弹窗...');
+    try {
+      const maybeLaterBtn = page.locator('text="Maybe later"').first();
+      if (await maybeLaterBtn.isVisible({ timeout: 3000 })) {
+        console.log('💥 发现 Trustpilot 好评弹窗，正在强行点击 [Maybe later] 关闭！');
+        await maybeLaterBtn.click();
+        await page.waitForTimeout(1500); // 等待弹窗消失动画
+      }
+    } catch (e) {
+      console.log('👌 未发现好评干扰弹窗，继续执行。');
+    }
+
+    // 🚨 致命拦截检测：检查是否被平台识别为 VPN
+    console.log('🕵️ 正在检查节点 IP 是否被风控拦截...');
+    const vpnWarning = page.locator('text="The use of VPNs is not permitted"').first();
+    if (await vpnWarning.isVisible({ timeout: 2000 })) {
+      throw new Error('🩸 IP_BLOCKED: 节点已被 Freemchost 识别为 VPN！页面拒绝加载续期按钮。请必须更换更冷门/家宽的节点 IP！');
+    }
+    console.log('✅ IP 干净，未触发风控拦截！');
 
     // 1. 点击主页面的 [Renew now] 按钮
     console.log('🔄 正在查找主页面 [Renew now] 按钮...');
