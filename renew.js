@@ -71,16 +71,16 @@ async function sendTelegramMessage(botToken, chatId, text) {
     console.log('📂 正在直达服务器详情页:', targetUrl);
     await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
     console.log('📍 实际到达页面 URL:', page.url());
-    await page.waitForTimeout(3000); // 等待页面基础渲染
+    await page.waitForTimeout(3000); // 等待页面 Vue/React 组件完全加载
 
     // 🛡️ 精准清理干扰弹窗 (只点 Maybe later，绝不碰续期选项)
     console.log('🛡️ 正在扫描并清理好评/广告干扰弹窗...');
     try {
-      const maybeLaterBtn = page.locator('text="Maybe later"').first();
+      const maybeLaterBtn = page.getByText(/maybe later/i).first();
       if (await maybeLaterBtn.isVisible({ timeout: 3000 })) {
         console.log('💥 发现 Trustpilot 好评弹窗，正在强行点击 [Maybe later] 关闭！');
         await maybeLaterBtn.click();
-        await page.waitForTimeout(1500); // 等待弹窗消失动画
+        await page.waitForTimeout(1500);
       }
     } catch (e) {
       console.log('👌 未发现好评干扰弹窗，继续执行。');
@@ -88,15 +88,17 @@ async function sendTelegramMessage(botToken, chatId, text) {
 
     // 🚨 致命拦截检测：检查是否被平台识别为 VPN
     console.log('🕵️ 正在检查节点 IP 是否被风控拦截...');
-    const vpnWarning = page.locator('text="The use of VPNs is not permitted"').first();
+    const vpnWarning = page.getByText(/use of VPNs is not permitted/i).first();
     if (await vpnWarning.isVisible({ timeout: 2000 })) {
-      throw new Error('🩸 IP_BLOCKED: 节点已被 Freemchost 识别为 VPN！页面拒绝加载续期按钮。请必须更换更冷门/家宽的节点 IP！');
+      throw new Error('🩸 IP_BLOCKED: 节点已被 Freemchost 识别为 VPN！');
     }
     console.log('✅ IP 干净，未触发风控拦截！');
 
-    // 1. 点击主页面的 [Renew now] 按钮
+    // 1. 点击主页面的 [Renew now] 按钮（使用通配正则，兼容 div/span/button 等所有标签）
     console.log('🔄 正在查找主页面 [Renew now] 按钮...');
-    const renewBtn = page.locator('button:has-text("Renew now"), a:has-text("Renew now")').first();
+    const renewBtn = page.getByText(/renew now/i).first();
+    
+    await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
     await renewBtn.waitFor({ state: 'visible', timeout: 30000 });
     
     console.log('👉 找到 [Renew now] 按钮，正在点击...');
@@ -104,7 +106,7 @@ async function sendTelegramMessage(botToken, chatId, text) {
 
     // 2. 等待 "Keep your server online" 弹窗出现并点击 [48 hours]
     console.log('📋 正在等待续期选择弹窗出现...');
-    const hours48Option = page.locator('text="48 hours"').first();
+    const hours48Option = page.getByText(/48 hours/i).first();
     await hours48Option.waitFor({ state: 'visible', timeout: 20000 });
 
     console.log('👉 成功捕获续期弹窗！正在点击 [48 hours] 免费续期选项...');
