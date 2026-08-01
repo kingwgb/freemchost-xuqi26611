@@ -32,10 +32,10 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-v1
 
-      - name: 安装 Playwright 及依赖
+      - name: 安装 Playwright、js-yaml 及依赖
         run: |
           npm init -y
-          npm install playwright
+          npm install playwright js-yaml
           npx playwright install chromium --with-deps
 
       - name: ⚙️ 部署 Mihomo 代理内核 (双引擎全协议支持)
@@ -58,11 +58,12 @@ jobs:
           gunzip mihomo.gz
           chmod +x mihomo
           
-          # 4. 生成 Node.js 节点解析脚本 (Node.js 语法完全免疫空格缩进问题)
+          # 4. 生成 Node.js 节点解析脚本
           cat << 'EOF' > parse_node.js
           const fs = require('fs');
           const http = require('http');
           const url = require('url');
+          const yaml = require('js-yaml');
 
           const nodeLink = (process.env.NODE_LINK || '').trim();
 
@@ -145,11 +146,10 @@ jobs:
           }
 
           (async () => {
-            let configStr = 'socks-port: 7891\nallow-lan: true\nmode: global\n';
             const subRes = await trySubconverter();
             if (subRes) {
               console.log('✅ Subconverter 转换成功！');
-              configStr += subRes;
+              fs.writeFileSync('config.yaml', 'socks-port: 7891\nallow-lan: true\nmode: global\n' + subRes);
             } else {
               console.log('⚠️ Subconverter 未返回有效配置，自动切换至 JS 原生节点解析器...');
               const nodeObj = parseRawLink(nodeLink);
@@ -157,20 +157,16 @@ jobs:
                 console.error('❌ 无法识别 NODE_LINK 格式！');
                 process.exit(1);
               }
-              configStr += 'proxies:\n';
-              for (const [k, v] of Object.entries(nodeObj)) {
-                if (typeof v === 'object' && v !== null) {
-                  configStr += `  - ${k}:\n`;
-                  for (const [subk, subv] of Object.entries(v)) {
-                    configStr += `      ${subk}: ${JSON.stringify(subv)}\n`;
-                  }
-                } else {
-                  if (k === 'name') configStr += `  - name: ${JSON.stringify(v)}\n`;
-                  else configStr += `    ${k}: ${JSON.stringify(v)}\n`;
-                }
-              }
+              
+              const configObj = {
+                'socks-port': 7891,
+                'allow-lan': true,
+                'mode': 'global',
+                'proxies': [ nodeObj ]
+              };
+              
+              fs.writeFileSync('config.yaml', yaml.dump(configObj));
             }
-            fs.writeFileSync('config.yaml', configStr);
             console.log('✅ Mihomo 配置文件 config.yaml 生成完毕！');
           })();
           EOF
