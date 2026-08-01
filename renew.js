@@ -36,7 +36,6 @@ async function sendTG(message) {
   const targetServerUrl = process.env.SERVER_PAGE_URL || 'https://freemchost.com/app/servers/744311a4-998f-4811-82be-b2957557c7b0';
   
   let currentProxy = null;
-  let isUsingProxy = false;
   
   if (nodeLink && nodeLink.trim() !== '') {
     currentProxy = 'socks5://127.0.0.1:7891';
@@ -52,51 +51,45 @@ async function sendTG(message) {
     let launchOptions = { headless: true };
     if (proxyServer) {
       launchOptions.proxy = { server: proxyServer };
-      isUsingProxy = true;
-    } else {
-      isUsingProxy = false;
     }
     browser = await chromium.launch(launchOptions);
     context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, me Gecko) Chrome/122.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1366, height: 768 }
     });
     page = await context.newPage();
   }
 
   try {
-    // 1. 代理连通性测试与降级
+    // 1. 强制代理连通性校验 (Freemchost 屏蔽 GitHub 机房 IP，必须走有效代理)
     if (currentProxy) {
-      console.log(`🌐 尝试使用代理接管网络: ${currentProxy}`);
+      console.log(`🌐 正在初始化代理网络: ${currentProxy}`);
       await initBrowser(currentProxy);
       try {
         console.log('📡 正在测试代理连通性...');
         await page.goto('https://freemchost.com/login', { timeout: 15000 });
-        console.log('✅ 代理连通性测试通过！');
+        console.log('✅ 代理连通性测试通过！节点工作正常。');
       } catch (e) {
-        if (e.message.includes('ERR_PROXY_CONNECTION_FAILED') || e.message.includes('timeout') || e.message.includes('ERR_CONNECTION_CLOSED')) {
-          console.log(`⚠️ 代理连接失败！节点可能已失效，自动切回【直连模式】继续运行...`);
-          await browser.close();
-          await initBrowser(null);
-        } else {
-          throw e;
-        }
+        console.error(`❌ 代理连接失败 (127.0.0.1:7891 未连通或节点失效): ${e.message}`);
+        await sendTG(`🚨 <b>Freemchost 自动化中断</b>\n\n<b>原因:</b> 代理节点连通性测试失败！\n<b>说明:</b> Freemchost 屏蔽 GitHub 直连 IP，无法降级运行。请检查 Actions 工作流中 NODE_LINK 节点启动日志！`);
+        process.exit(1);
       }
     } else {
-      console.log(`🌐 未配置代理，直接使用直连运行。`);
+      console.log(`⚠️ 未检测到 NODE_LINK / PROXY_URL 代理环境变量配置！`);
+      console.log(`🌐 强制尝试使用 GitHub 直连（极大概率会被平台阻断）...`);
       await initBrowser(null);
     }
 
-    // 🔨【高频打地鼠】启动全局后台弹窗自动点灭守护者 (每 500ms 监控一次)
+    // 🔨 启动全局后台高频弹窗杀手守护者 (每 500ms 监控并击灭干扰弹窗)
     const popupDaemon = setInterval(async () => {
       try {
         if (!page || page.isClosed()) return;
         
-        // 如果已经到了最终续期选择框，停止点灭，避免误关
+        // 避开真正的续期选单
         const isRenewalModalOpen = await page.locator('text="Keep your server online"').isVisible().catch(() => false);
         if (isRenewalModalOpen) return;
 
-        // 自动点击 "Maybe later" 按钮
+        // 捕获并清掉 "Maybe later" 干扰弹窗
         const maybeLaterBtns = page.getByText('Maybe later', { exact: false });
         const count = await maybeLaterBtns.count().catch(() => 0);
         if (count > 0) {
@@ -109,7 +102,7 @@ async function sendTG(message) {
           }
         }
       } catch (e) {
-        // 忽略后台扫描微小异常
+        // 忽略扫轮中的临时异常
       }
     }, 500);
 
@@ -139,31 +132,6 @@ async function sendTG(message) {
     await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
     await page.waitForTimeout(3000);
-
-    // 🚨 检查是否触碰了平台的 VPN/IP 封锁拦截
-    let vpnBlocked = await page.locator('text="The use of VPNs is not permitted"').isVisible().catch(() => false);
-    let loadFailed = await page.locator('text="Couldn\'t load this server."').isVisible().catch(() => false);
-
-    if (vpnBlocked || loadFailed) {
-      console.log('⚠️ 检测到页面提示 VPN 拦截或服务器加载失败，尝试刷新页面重试一次...');
-      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-      await page.waitForTimeout(4000);
-      
-      vpnBlocked = await page.locator('text="The use of VPNs is not permitted"').isVisible().catch(() => false);
-      loadFailed = await page.locator('text="Couldn\'t load this server."').isVisible().catch(() => false);
-    }
-
-    if (vpnBlocked || loadFailed) {
-      console.log('❌ 确认被平台识别为机房/VPN IP 拦截，无法加载服务器数据！');
-      clearInterval(popupDaemon);
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const screenshotPath = path.join(screenshotDir, `vpn-blocked-${timestamp}.png`);
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-
-      await sendTG(`🚨 <b>Freemchost 续期失败 (IP被拦截)</b>\n\n<b>原因:</b> 平台检测到当前 IP 为 VPN/数据中心 IP，拒绝加载服务器数据（提示: Couldn't load this server）。\n<b>建议:</b> 请检查 NODE_LINK 代理节点配置，确保节点可用且为原生/家宽 IP！`);
-      process.exit(1);
-    }
 
     // 4. 轮询点击 [Renew now] 按钮与后续续期操作
     console.log('🔄 开始监控 [Renew now] 按钮与续期流程...');
@@ -209,8 +177,7 @@ async function sendTG(message) {
     // 5. 结果处理
     if (success) {
       await page.waitForTimeout(5000);
-      const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动击灭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动清理干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
     } else {
       console.log('⚠️ 轮询超时，未能完成续期，截图保存现场...');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
