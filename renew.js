@@ -23,6 +23,29 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
+// 🛡️ 智能自动扫除营销/反馈类干扰弹窗 (如 Got an idea / Trustpilot 等)
+async function clearMarketingPopups(page) {
+  const dismissTargets = [
+    'text="Maybe later"',
+    'button:has-text("Maybe later")',
+    'text="I need help"',
+    'button:has-text("I need help")'
+  ];
+
+  for (let i = 0; i < 3; i++) { // 循环扫 3 次，防止延迟弹出的遮罩
+    for (const target of dismissTargets) {
+      try {
+        const btn = page.locator(target).first();
+        if (await btn.isVisible({ timeout: 1000 })) {
+          console.log(`💥 发现营销/反馈干扰弹窗，正在点击 [${target}] 关闭...`);
+          await btn.click({ force: true });
+          await page.waitForTimeout(1000);
+        }
+      } catch (e) {}
+    }
+  }
+}
+
 (async () => {
   const email = process.env.FREE_EMAIL;
   const password = process.env.FREE_PASSWORD;
@@ -31,15 +54,14 @@ async function sendTelegramMessage(botToken, chatId, text) {
   const tgToken = process.env.TG_BOT_TOKEN;
   const tgChatId = process.env.TG_CHAT_ID;
 
-  console.log('🚀 正在启动隐藏特征的伪装浏览器...');
+  console.log('🚀 正在启动伪装浏览器...');
 
   const launchOptions = {
     headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled', // 核心：禁用 Chrome 自动化标记
-      '--disable-infobars',
+      '--disable-blink-features=AutomationControlled',
       '--window-size=1920,1080'
     ]
   };
@@ -50,24 +72,15 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 
   const browser = await chromium.launch(launchOptions);
-  
-  // 创建模拟真实用户的 Context
   const context = await browser.newContext({
     viewport: { width: 1920, height: 1080 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-    extraHTTPHeaders: {
-      'accept-language': 'en-US,en;q=0.9'
-    }
+    locale: 'en-US'
   });
 
-  // 🛡️ 注入 Stealth 脚本：抹除 webdriver 特征，模仿正常人浏览器
+  // 抹除自动化痕迹
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    window.chrome = { runtime: {} };
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
   });
 
   const page = await context.newPage();
@@ -93,37 +106,32 @@ async function sendTelegramMessage(botToken, chatId, text) {
     console.log('📂 正在直达服务器详情页:', targetUrl);
     await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
     console.log('📍 实际到达页面 URL:', page.url());
-    await page.waitForTimeout(4000); // 留足页面 JS 渲染时间
+    await page.waitForTimeout(3000);
 
-    // 1. 处理可能挡住屏幕的广告/好评弹窗 (如 Maybe later)
-    try {
-      const maybeLaterBtn = page.getByText(/maybe later/i).first();
-      if (await maybeLaterBtn.isVisible({ timeout: 3000 })) {
-        console.log('💥 发现干扰弹窗，正在点击 [Maybe later] 关闭...');
-        await maybeLaterBtn.click();
-        await page.waitForTimeout(1500);
-      }
-    } catch (e) {}
+    // 1. 扫除可能挡住屏幕的广告/反馈弹窗
+    console.log('🛡️ 检查并扫除干扰弹窗...');
+    await clearMarketingPopups(page);
 
-    // 2. 寻找主页面的 [Renew now] 按钮并点击
+    // 2. 寻找主页面的 [Renew now] 按钮
     console.log('🔄 正在寻找 [Renew now] 按钮...');
+    const renewBtn = page.locator('button:has-text("Renew now"), a:has-text("Renew now"), *:has-text("Renew now")').last();
     
-    // 强制滚动并等待按钮出现，兼容任意包裹标签
-    const renewBtn = page.locator('*:has-text("Renew now")').last();
+    // 如果还被遮挡，再次强行扫除一次弹窗
+    await clearMarketingPopups(page);
+
     await renewBtn.waitFor({ state: 'visible', timeout: 30000 });
-    
     console.log('👉 找到 [Renew now] 按钮，点击中...');
     await renewBtn.click({ force: true });
 
-    // 3. 等待弹窗出现并选择 48 hours
-    console.log('📋 正在等待续期选择弹窗...');
+    // 3. 等待真正的续期弹窗出现并点击 [48 hours]
+    console.log('📋 正在等待 48小时 续期选择弹窗...');
     const hours48Option = page.locator('*:has-text("48 hours")').last();
     await hours48Option.waitFor({ state: 'visible', timeout: 20000 });
 
-    console.log('👉 点击 [48 hours] 选项...');
+    console.log('👉 成功捕获续期弹窗！点击 [48 hours] 选项...');
     await hours48Option.click({ force: true });
 
-    // 4. 完成续期并存图
+    // 4. 等待响应并保存成功截图
     await page.waitForTimeout(5000);
     await page.screenshot({ path: 'screenshots/renew_success.png', fullPage: true });
 
