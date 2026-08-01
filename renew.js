@@ -25,6 +25,49 @@ async function sendTG(message) {
   }
 }
 
+// 🛡️ 智能清理干扰弹窗（绝不摧毁主页面）
+async function clearInterferingModals(page) {
+  console.log('🕵️ 正在检查并清除干扰弹窗 (Discord / Feedback / Trustpilot)...');
+  
+  for (let i = 0; i < 3; i++) {
+    try {
+      // 检查页面是否存在非“续期”弹窗
+      const isRenewalModalPresent = await page.locator('text="Keep your server online"').isVisible({ timeout: 500 }).catch(() => false);
+      if (isRenewalModalPresent) {
+        console.log('🎯 检测到目标续期弹窗，停止清理干扰弹窗。');
+        break;
+      }
+
+      // 寻找 "Maybe later" 按钮并模拟点击
+      const maybeLaterBtns = page.getByText('Maybe later', { exact: false });
+      const count = await maybeLaterBtns.count();
+      if (count > 0) {
+        for (let j = 0; j < count; j++) {
+          const btn = maybeLaterBtns.nth(j);
+          if (await btn.isVisible().catch(() => false)) {
+            await btn.click({ force: true }).catch(() => {});
+            console.log('🎉 成功点击 "Maybe later" 关闭干扰弹窗！');
+            await page.waitForTimeout(800);
+          }
+        }
+      }
+
+      // 安全隐藏遮罩层 (不删除 DOM)
+      await page.evaluate(() => {
+        const dialogs = document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]');
+        dialogs.forEach(dialog => {
+          if (!dialog.innerText.includes('Keep your server online')) {
+            dialog.style.display = 'none';
+          }
+        });
+      }).catch(() => {});
+
+    } catch (e) {
+      // 忽略清理过程中的微小错误
+    }
+  }
+}
+
 (async () => {
   const screenshotDir = path.join(__dirname, 'screenshots');
   if (!fs.existsSync(screenshotDir)) {
@@ -33,7 +76,6 @@ async function sendTG(message) {
 
   const proxyUrl = process.env.PROXY_URL;
   const nodeLink = process.env.NODE_LINK;
-  
   const targetServerUrl = process.env.SERVER_PAGE_URL || 'https://freemchost.com/app/servers/744311a4-998f-4811-82be-b2957557c7b0';
   
   let currentProxy = null;
@@ -58,51 +100,15 @@ async function sendTG(message) {
       isUsingProxy = false;
     }
     browser = await chromium.launch(launchOptions);
-    
     context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1366, height: 768 }
     });
-
-    // 🚨【核心武器】注入实时 DOM 监听器：一旦弹窗生成，0.01秒内自动粉碎！
-    await context.addInitScript(() => {
-      const badKeywords = ['Maybe later', 'Discord', 'Trustpilot', 'Enjoying FreeMCHost', 'Join the FreeMCHost community'];
-      
-      const cleanBadModals = () => {
-        const elements = document.querySelectorAll('*');
-        elements.forEach(el => {
-          if (el.children.length === 0 && el.textContent) {
-            const text = el.textContent;
-            const isBad = badKeywords.some(kw => text.includes(kw));
-            // 确保绝对不误伤续期弹窗 (Keep your server online)
-            if (isBad && !document.body.innerText.includes('Keep your server online')) {
-              let target = el;
-              for (let i = 0; i < 8; i++) {
-                if (target.parentElement && target.parentElement !== document.body) {
-                  target = target.parentElement;
-                  const pos = window.getComputedStyle(target).position;
-                  if (pos === 'fixed' || pos === 'absolute' || target.getAttribute('role') === 'dialog') {
-                    target.remove();
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        });
-      };
-
-      // 创建 DOM 变动监听器
-      const observer = new MutationObserver(() => cleanBadModals());
-      window.addEventListener('DOMContentLoaded', () => {
-        observer.observe(document.body, { childList: true, subtree: true });
-      });
-    });
-
     page = await context.newPage();
   }
 
   try {
-    // 1. 代理测试与降级
+    // 1. 代理连通性测试与自动降级
     if (currentProxy) {
       console.log(`🌐 尝试使用代理接管网络: ${currentProxy}`);
       await initBrowser(currentProxy);
@@ -149,63 +155,67 @@ async function sendTG(message) {
     console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
     await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     console.log(`📍 实际到达页面 URL: ${page.url()}`);
+    await page.waitForTimeout(3000);
+
+    // 4. 清理干扰弹窗
+    await clearInterferingModals(page);
+
+    // 5. 定位并点击右侧面板的 [Renew now] 按钮
+    console.log('⏳ 正在寻找页面右侧的 [Renew now] 按钮...');
     
-    // 4. 轮询清理弹窗兜底 (防延迟渲染)
-    console.log('🛡️ 激活防遮挡双重清理防护...');
-    for (let i = 0; i < 5; i++) {
-      const maybeBtn = page.getByText('Maybe later', { exact: false }).first();
-      if (await maybeBtn.isVisible({ timeout: 600 }).catch(() => false)) {
-        await maybeBtn.click({ force: true }).catch(() => {});
-        console.log('🎉 手动补刀：成功点击 "Maybe later"！');
-      }
-      await page.waitForTimeout(500);
+    const renewBtn = page.locator('button').filter({ hasText: /^Renew now$/i }).first();
+    const renewBtnFallback = page.getByRole('button', { name: /Renew now/i }).first();
+
+    let isBtnReady = await renewBtn.waitFor({ state: 'attached', timeout: 10000 }).then(() => true).catch(() => false);
+    let targetBtn = renewBtn;
+
+    if (!isBtnReady) {
+      isBtnReady = await renewBtnFallback.waitFor({ state: 'attached', timeout: 5000 }).then(() => true).catch(() => false);
+      targetBtn = renewBtnFallback;
     }
 
-    // 5. 点击右下角 [Renew now]
-    console.log('⏳ 正在等待右下角 [Renew now] 按钮...');
-    const renewBtn = page.locator('button:has-text("Renew now"), button:has-text("Renew")').first();
-    const isReady = await renewBtn.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
+    if (isBtnReady) {
+      console.log('🎉 已找到 [Renew now] 按钮，尝试点击...');
+      await targetBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await targetBtn.click({ force: true });
+      console.log('🚀 已成功点击 [Renew now]！等待 [Keep your server online] 续期弹窗出现...');
 
-    if (isReady) {
-      await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
-      await renewBtn.click({ timeout: 5000, force: true });
-      console.log('🎉 成功点击 [Renew now]，等待续期弹窗 [Keep your server online] 出现...');
+      await page.waitForTimeout(2000);
 
-      // 6. 等待续期弹窗并选择 [48 hours]
-      console.log('⏳ 正在寻觅弹窗中的 [48 hours] 免费续期卡片...');
+      // 6. 处理二次弹窗：点击 [48 hours] 选项
+      console.log('⏳ 正在寻找弹窗中的 [48 hours] 免费续期区域...');
       
-      const optionCard = page.locator('div, button, article').filter({ hasText: /48\s*hours/i }).last();
-      const optionTextFallback = page.getByText(/48\s*hours/i).first();
+      const modalHeader = page.locator('text="Keep your server online"');
+      await modalHeader.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
 
-      const optionReady = await Promise.race([
-        optionCard.waitFor({ state: 'visible', timeout: 15000 }).then(() => optionCard),
-        optionTextFallback.waitFor({ state: 'visible', timeout: 15000 }).then(() => optionTextFallback)
-      ]).catch(() => null);
+      const option48h = page.locator('div, button, article').filter({ hasText: /48\s*hours/i }).last();
+      const optionReady = await option48h.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
 
       if (optionReady) {
-        await optionReady.click({ timeout: 5000, force: true });
-        console.log('🎉🎉【完美成功】已精准点击 [48 hours] 续期卡片！全流程完成！');
+        await option48h.scrollIntoViewIfNeeded().catch(() => {});
+        await option48h.click({ force: true });
+        console.log('🎉🎉【最终成功】已精准点击 [48 hours] 选项！服务器续期完成！');
 
-        await page.waitForTimeout(5000); // 等待网络提交完成
+        await page.waitForTimeout(5000); // 等待网络请求发送完毕
         
         const ipStatus = isUsingProxy ? '节点代理模式' : 'GitHub 直连模式';
-        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动消灭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+        await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已成功关闭干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>网络:</b> ${ipStatus}\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
       } else {
-        console.log('⚠️ 未能定位到 [48 hours] 选项，存图排查...');
+        console.log('⚠️ 弹窗中未能在规定时间内找到 [48 hours] 选项，截留现场照片...');
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const screenshotPath = path.join(screenshotDir, `modal-error-${timestamp}.png`);
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
 
-        await sendTG(`⚠️ <b>Freemchost 续期异常</b>\n\n<b>状态:</b> 已点击 Renew now，但弹窗中未找到 48 hours 选项。截图已保存。`);
+        await sendTG(`⚠️ <b>Freemchost 续期异常</b>\n\n<b>状态:</b> 已点击 Renew now，但未能定位到 48 hours 选项。现场截图已保存。`);
       }
 
     } else {
-      console.log('⚠️ 依然未检测到 [Renew now] 按钮，保存现场截图...');
+      console.log('⚠️ 依然未能定位到 [Renew now] 按钮，截留现场截图...');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const screenshotPath = path.join(screenshotDir, `not-found-${timestamp}.png`);
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
 
-      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 未能等待到 Renew now 按钮，可能已完成续期或处于不可续期状态。截图已生成。`);
+      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 未检测到 Renew now 按钮，可能已处于不可续期状态或加载异常。截图已生成。`);
     }
 
   } catch (error) {
