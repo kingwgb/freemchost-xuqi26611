@@ -1,212 +1,108 @@
 const { chromium } = require('playwright');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 
-// TG 通知函数
-async function sendTG(message) {
-  const token = process.env.TG_BOT_TOKEN;
-  const chatId = process.env.TG_CHAT_ID;
-  
-  if (!token || !chatId || token.includes('替换')) {
-    console.log('未配置有效的 TG 参数，跳过通知。');
-    return;
-  }
+// 确保截图保存目录存在
+if (!fs.existsSync('screenshots')) {
+  fs.mkdirSync('screenshots');
+}
 
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+// Telegram 通知工具
+async function sendTelegramMessage(botToken, chatId, text) {
+  if (!botToken || !chatId) return;
   try {
+    const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
     await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' })
+      body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML' })
     });
     console.log('📢 TG 通知已发送！');
-  } catch (e) {
-    console.error("❌ TG推送失败:", e.message);
+  } catch (err) {
+    console.error('❌ TG 通知发送失败:', err.message);
   }
 }
 
 (async () => {
-  const screenshotDir = path.join(__dirname, 'screenshots');
-  if (!fs.existsSync(screenshotDir)) {
-    fs.mkdirSync(screenshotDir);
-  }
-
+  const email = process.env.FREE_EMAIL;
+  const password = process.env.FREE_PASSWORD;
+  const serverPageUrl = process.env.SERVER_PAGE_URL;
   const proxyUrl = process.env.PROXY_URL;
-  const nodeLink = process.env.NODE_LINK;
-  const targetServerUrl = process.env.SERVER_PAGE_URL || 'https://freemchost.com/app/servers/744311a4-998f-4811-82be-b2957557c7b0';
-  
-  let currentProxy = null;
-  
-  if (nodeLink && nodeLink.trim() !== '') {
-    currentProxy = 'socks5://127.0.0.1:7891';
-  } else if (proxyUrl && proxyUrl.trim() !== '') {
-    currentProxy = proxyUrl.trim();
+  const tgToken = process.env.TG_BOT_TOKEN;
+  const tgChatId = process.env.TG_CHAT_ID;
+
+  console.log('🚀 正在启动浏览器...');
+
+  const launchOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  };
+
+  if (proxyUrl) {
+    console.log(`🌐 正在初始化代理网络: ${proxyUrl}`);
+    launchOptions.proxy = { server: proxyUrl };
   }
 
-  let browser;
-  let context;
-  let page;
-
-  async function initBrowser(proxyServer) {
-    let launchOptions = { headless: true };
-    if (proxyServer) {
-      launchOptions.proxy = { server: proxyServer };
-    }
-    browser = await chromium.launch(launchOptions);
-    context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      viewport: { width: 1366, height: 768 }
-    });
-    page = await context.newPage();
-  }
+  const browser = await chromium.launch(launchOptions);
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  });
+  const page = await context.newPage();
 
   try {
-    // 1. 强制代理连通性校验 (Freemchost 屏蔽 GitHub 机房 IP，必须走有效代理)
-    if (currentProxy) {
-      console.log(`🌐 正在初始化代理网络: ${currentProxy}`);
-      await initBrowser(currentProxy);
-      try {
-        console.log('📡 正在测试代理连通性...');
-        await page.goto('https://freemchost.com/login', { timeout: 15000 });
-        console.log('✅ 代理连通性测试通过！节点工作正常。');
-      } catch (e) {
-        console.error(`❌ 代理连接失败 (127.0.0.1:7891 未连通或节点失效): ${e.message}`);
-        await sendTG(`🚨 <b>Freemchost 自动化中断</b>\n\n<b>原因:</b> 代理节点连通性测试失败！\n<b>说明:</b> Freemchost 屏蔽 GitHub 直连 IP，无法降级运行。请检查 Actions 工作流中 NODE_LINK 节点启动日志！`);
-        process.exit(1);
-      }
-    } else {
-      console.log(`⚠️ 未检测到 NODE_LINK / PROXY_URL 代理环境变量配置！`);
-      console.log(`🌐 强制尝试使用 GitHub 直连（极大概率会被平台阻断）...`);
-      await initBrowser(null);
-    }
-
-    // 🔨 启动全局后台高频弹窗杀手守护者 (每 500ms 监控并击灭干扰弹窗)
-    const popupDaemon = setInterval(async () => {
-      try {
-        if (!page || page.isClosed()) return;
-        
-        // 避开真正的续期选单
-        const isRenewalModalOpen = await page.locator('text="Keep your server online"').isVisible().catch(() => false);
-        if (isRenewalModalOpen) return;
-
-        // 捕获并清掉 "Maybe later" 干扰弹窗
-        const maybeLaterBtns = page.getByText('Maybe later', { exact: false });
-        const count = await maybeLaterBtns.count().catch(() => 0);
-        if (count > 0) {
-          for (let i = 0; i < count; i++) {
-            const btn = maybeLaterBtns.nth(i);
-            if (await btn.isVisible().catch(() => false)) {
-              await btn.click({ force: true }).catch(() => {});
-              console.log('💥 [后台守护者] 捕获并强制击灭干扰弹窗 (Maybe later)！');
-            }
-          }
-        }
-      } catch (e) {
-        // 忽略扫轮中的临时异常
-      }
-    }, 500);
-
-    // 2. 账号登录
     console.log('🚀 正在打开 Freemchost 登录页面...');
-    await page.goto('https://freemchost.com/login', { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+    await page.goto('https://freemchost.com/login', { waitUntil: 'networkidle', timeout: 60000 });
 
     console.log('📝 正在输入账号密码...');
-    await page.waitForSelector('input[type="email"]', { timeout: 15000 });
-    await page.locator('input[type="email"]').fill(process.env.FREE_EMAIL);
-    await page.locator('input[type="password"]').fill(process.env.FREE_PASSWORD);
-    
+    await page.fill('input[type="email"], input[name="email"]', email);
+    await page.fill('input[type="password"], input[name="password"]', password);
+
     console.log('🔐 正在尝试登录...');
-    await page.getByRole('button', { name: /sign in|login/i }).click();
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }),
+      page.click('button[type="submit"]')
+    ]);
 
-    console.log('⏳ 等待登录成功...');
-    await Promise.race([
-      page.waitForURL(url => !url.pathname.includes('/login'), { waitUntil: 'domcontentloaded', timeout: 45000 }),
-      page.locator('input[type="password"]').waitFor({ state: 'hidden', timeout: 45000 })
-    ]).catch(() => null);
+    console.log('✅ 登录成功！当前 URL:', page.url());
 
-    console.log(`✅ 登录成功！当前 URL: ${page.url()}`);
-    await page.waitForTimeout(2000);
+    // 跳转服务器详情页
+    const targetUrl = serverPageUrl || 'https://freemchost.com/app';
+    console.log('📂 正在直达服务器详情页:', targetUrl);
+    await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
+    console.log('📍 实际到达页面 URL:', page.url());
 
-    // 3. 直达服务器详情页
-    console.log(`📂 正在直达服务器详情页: ${targetServerUrl}`);
-    await page.goto(targetServerUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    console.log(`📍 实际到达页面 URL: ${page.url()}`);
-    await page.waitForTimeout(3000);
-
-    // 4. 轮询点击 [Renew now] 按钮与后续续期操作
-    console.log('🔄 开始监控 [Renew now] 按钮与续期流程...');
+    // 1. 点击主页面的 [Renew now] 按钮
+    console.log('🔄 正在查找主页面 [Renew now] 按钮...');
+    const renewBtn = page.locator('button:has-text("Renew now"), a:has-text("Renew now")').first();
+    await renewBtn.waitFor({ state: 'visible', timeout: 30000 });
     
-    let success = false;
-    const maxWaitTime = 40000;
-    const startTime = Date.now();
+    console.log('👉 找到 [Renew now] 按钮，正在点击...');
+    await renewBtn.click();
 
-    while (Date.now() - startTime < maxWaitTime) {
-      // 检查 A: 是否弹出终极续期选单 [Keep your server online]
-      const isRenewalModalVisible = await page.locator('text="Keep your server online"').isVisible().catch(() => false);
+    // 2. 等待 "Keep your server online" 弹窗出现并点击 [48 hours]
+    console.log('📋 正在等待续期选择弹窗出现...');
+    const hours48Option = page.locator('text="48 hours"').first();
+    await hours48Option.waitFor({ state: 'visible', timeout: 20000 });
 
-      if (isRenewalModalVisible) {
-        console.log('🎉 成功捕获续期弹窗 [Keep your server online]！准备选择 [48 hours]...');
-        await page.waitForTimeout(1000);
+    console.log('👉 成功捕获续期弹窗！正在点击 [48 hours] 免费续期选项...');
+    await hours48Option.click();
 
-        const option48h = page.locator('div, button, article, p, span').filter({ hasText: /48\s*hours/i }).last();
-        if (await option48h.isVisible().catch(() => false)) {
-          await option48h.scrollIntoViewIfNeeded().catch(() => {});
-          await option48h.click({ force: true });
-          console.log('🎉🎉【完美成功】已精准点击 [48 hours] 免费续期卡片！全流程完成！');
-          success = true;
-          break;
-        }
-      }
+    // 3. 等待响应并保存成功截图
+    await page.waitForTimeout(5000);
+    await page.screenshot({ path: 'screenshots/renew_success.png', fullPage: true });
 
-      // 检查 B: 点击右侧面板 [Renew now] 按钮
-      if (!isRenewalModalVisible) {
-        const renewBtn = page.locator('button:has-text("Renew now"), button:has-text("Renew")').first();
-        if (await renewBtn.isVisible().catch(() => false)) {
-          console.log('🎯 捕获到 [Renew now] 按钮，尝试点击...');
-          await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
-          await renewBtn.click({ force: true }).catch(() => {});
-          await page.waitForTimeout(2000);
-        }
-      }
-
-      await page.waitForTimeout(1000);
-    }
-
-    clearInterval(popupDaemon);
-
-    // 5. 结果处理
-    if (success) {
-      await page.waitForTimeout(5000);
-      await sendTG(`🎉 <b>Freemchost 自动续期成功</b>\n\n<b>状态:</b> 已自动清理干扰弹窗，点击 [Renew now] 并选择 [48 hours] 完成续期！\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
-    } else {
-      console.log('⚠️ 轮询超时，未能完成续期，截图保存现场...');
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const screenshotPath = path.join(screenshotDir, `not-found-${timestamp}.png`);
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-
-      await sendTG(`⚠️ <b>Freemchost 续期跳过</b>\n\n<b>状态:</b> 未能完成续期操作，可能已处于不可续期状态或页面加载异常。截图已生成。`);
-    }
+    const successMsg = '🎉 Freemchost 服务器已成功选择 48小时 续期！';
+    console.log('✅ ' + successMsg);
+    await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
   } catch (error) {
-    console.error('❌ 自动化执行期间发生异常:', error.message);
-    
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const screenshotPath = path.join(screenshotDir, `error-${timestamp}.png`);
-    
-    try {
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`📸 异常现场截图已保存至: ${screenshotPath}`);
-    } catch (screenshotError) {
-      console.error('❌ 截图保存失败:', screenshotError.message);
-    }
-    
-    await sendTG(`🚨 <b>Freemchost 自动续期失败</b>\n\n<b>错误详情:</b> <code>${error.message.substring(0, 150)}...</code>\n<b>排查:</b> 脚本异常退出，请前往 GitHub Actions 页面下载截图！`);
-    
-    process.exit(1);
+    console.error('❌ 执行过程中出错:', error.message);
+    await page.screenshot({ path: 'screenshots/renew_error.png', fullPage: true });
+    await sendTelegramMessage(tgToken, tgChatId, `⚠️ Freemchost 续期失败: ${error.message}`);
+    process.exitCode = 1;
   } finally {
-    if (browser) {
-      await browser.close();
-      console.log('🏁 浏览器已关闭，任务结束。');
-    }
+    await browser.close();
+    console.log('🏁 浏览器已关闭，任务结束。');
   }
 })();
