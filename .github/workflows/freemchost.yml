@@ -58,109 +58,125 @@ jobs:
           gunzip mihomo.gz
           chmod +x mihomo
           
-          # 4. 生成 Python 解析脚本 (统一 10 空格缩进，彻底解决 YAML 语法解析冲突)
-          cat << 'EOF' | sed 's/^          //' > parse_node.py
-          import os, sys, urllib.parse, urllib.request, base64, json
+          # 4. 生成 Node.js 节点解析脚本 (Node.js 语法完全免疫空格缩进问题)
+          cat << 'EOF' > parse_node.js
+          const fs = require('fs');
+          const http = require('http');
+          const url = require('url');
 
-          node_link = os.environ.get("NODE_LINK", "").strip()
+          const nodeLink = (process.env.NODE_LINK || '').trim();
 
-          def try_subconverter():
-              try:
-                  url = "http://127.0.0.1:25500/sub?target=clash&url=http://127.0.0.1:8080/node.txt&insert=false"
-                  req = urllib.request.urlopen(url, timeout=5)
-                  res = req.read().decode("utf-8", errors="ignore")
-                  if "proxies:" in res and "name:" in res:
-                      return res
-              except Exception:
-                  pass
-              return None
+          async function trySubconverter() {
+            return new Promise((resolve) => {
+              http.get('http://127.0.0.1:25500/sub?target=clash&url=http://127.0.0.1:8080/node.txt&insert=false', (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  if (data.includes('proxies:') && data.includes('name:')) {
+                    resolve(data);
+                  } else {
+                    resolve(null);
+                  }
+                });
+              }).on('error', () => resolve(null));
+            });
+          }
 
-          def parse_raw_link(link):
-              link = link.strip()
-              if link.startswith("socks5://") or link.startswith("socks://"):
-                  u = urllib.parse.urlparse(link)
-                  return {"name": "node", "type": "socks5", "server": u.hostname, "port": u.port or 1080, "username": u.username or "", "password": u.password or ""}
-              elif link.startswith("hysteria2://") or link.startswith("hy2://"):
-                  url_str = link.replace("hy2://", "hysteria2://")
-                  u = urllib.parse.urlparse(url_str)
-                  qs = urllib.parse.parse_qs(u.query)
-                  pwd = u.username or (u.netloc.split("@")[0] if "@" in u.netloc else "")
-                  pwd = pwd.split(":")[0] if ":" in pwd else pwd
-                  n = {"name": "node", "type": "hysteria2", "server": u.hostname, "port": u.port or 443, "password": pwd}
-                  if "sni" in qs: n["sni"] = qs["sni"][0]
-                  if "insecure" in qs and qs["insecure"][0] in ["1", "true"]: n["skip-cert-verify"] = True
-                  return n
-              elif link.startswith("tuic://"):
-                  u = urllib.parse.urlparse(link)
-                  qs = urllib.parse.parse_qs(u.query)
-                  uinfo = (u.username or "").split(":")
-                  n = {"name": "node", "type": "tuic", "server": u.hostname, "port": u.port or 443, "uuid": uinfo[0], "password": uinfo[1] if len(uinfo)>1 else "", "congestion-controller": qs.get("congestion_control", ["bbr"])[0]}
-                  if "sni" in qs: n["sni"] = qs["sni"][0]
-                  if "insecure" in qs and qs["insecure"][0] in ["1", "true"]: n["skip-cert-verify"] = True
-                  return n
-              elif link.startswith("vless://"):
-                  u = urllib.parse.urlparse(link)
-                  qs = urllib.parse.parse_qs(u.query)
-                  sec = qs.get("security", [""])[0]
-                  n = {"name": "node", "type": "vless", "server": u.hostname, "port": u.port or 443, "uuid": u.username, "tls": sec in ["tls", "reality"], "network": qs.get("type", ["tcp"])[0]}
-                  if "sni" in qs: n["servername"] = qs["sni"][0]
-                  if "fp" in qs: n["client-fingerprint"] = qs["fp"][0]
-                  if sec == "reality":
-                      n["reality-opts"] = {"public-key": qs.get("pbk", [""])[0]}
-                      if "sid" in qs: n["reality-opts"]["short-id"] = qs["sid"][0]
-                  if n["network"] == "ws":
-                      n["ws-opts"] = {"path": qs.get("path", ["/"])[0]}
-                      if "host" in qs: n["ws-opts"]["headers"] = {"Host": qs["host"][0]}
-                  elif n["network"] == "grpc":
-                      n["grpc-opts"] = {"grpc-service-name": qs.get("serviceName", [""])[0]}
-                  return n
-              elif link.startswith("vmess://"):
-                  b64 = link[8:]
-                  b64 += "=" * (-len(b64) % 4)
-                  data = json.loads(base64.b64decode(b64).decode("utf-8"))
-                  n = {"name": "node", "type": "vmess", "server": data.get("add"), "port": int(data.get("port", 443)), "uuid": data.get("id"), "alterId": int(data.get("aid", 0)), "cipher": "auto", "tls": data.get("tls") == "tls", "network": data.get("net", "tcp")}
-                  if data.get("sni"): n["servername"] = data["sni"]
-                  if n["network"] == "ws":
-                      n["ws-opts"] = {"path": data.get("path", "/")}
-                      if data.get("host"): n["ws-opts"]["headers"] = {"Host": data["host"]}
-                  return n
-              elif link.startswith("trojan://"):
-                  u = urllib.parse.urlparse(link)
-                  qs = urllib.parse.parse_qs(u.query)
-                  n = {"name": "node", "type": "trojan", "server": u.hostname, "port": u.port or 443, "password": u.username}
-                  if "sni" in qs: n["sni"] = qs["sni"][0]
-                  if "allowInsecure" in qs and qs["allowInsecure"][0] in ["1", "true"]: n["skip-cert-verify"] = True
-                  return n
-              return None
+          function parseRawLink(link) {
+            link = link.trim();
+            if (link.startsWith('socks5://') || link.startsWith('socks://')) {
+              const u = new url.URL(link);
+              return { name: 'node', type: 'socks5', server: u.hostname, port: parseInt(u.port || '1080'), username: u.username || '', password: u.password || '' };
+            }
+            if (link.startsWith('hysteria2://') || link.startsWith('hy2://')) {
+              const u = new url.URL(link.replace('hy2://', 'hysteria2://'));
+              const pwd = u.username || (u.pathname || '').replace(/^\/\//, '').split('@')[0].split(':')[0];
+              const n = { name: 'node', type: 'hysteria2', server: u.hostname, port: parseInt(u.port || '443'), password: pwd };
+              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
+              if (['1', 'true'].includes(u.searchParams.get('insecure'))) n['skip-cert-verify'] = true;
+              return n;
+            }
+            if (link.startsWith('tuic://')) {
+              const u = new url.URL(link);
+              const uinfo = (u.username || '').split(':');
+              const n = { name: 'node', type: 'tuic', server: u.hostname, port: parseInt(u.port || '443'), uuid: uinfo[0], password: uinfo[1] || '', 'congestion-controller': u.searchParams.get('congestion_control') || 'bbr' };
+              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
+              if (['1', 'true'].includes(u.searchParams.get('insecure'))) n['skip-cert-verify'] = true;
+              return n;
+            }
+            if (link.startsWith('vless://')) {
+              const u = new url.URL(link);
+              const sec = u.searchParams.get('security') || '';
+              const n = { name: 'node', type: 'vless', server: u.hostname, port: parseInt(u.port || '443'), uuid: u.username, tls: ['tls', 'reality'].includes(sec), network: u.searchParams.get('type') || 'tcp' };
+              if (u.searchParams.get('sni')) n.servername = u.searchParams.get('sni');
+              if (u.searchParams.get('fp')) n['client-fingerprint'] = u.searchParams.get('fp');
+              if (sec === 'reality') {
+                n['reality-opts'] = { 'public-key': u.searchParams.get('pbk') || '' };
+                if (u.searchParams.get('sid')) n['reality-opts']['short-id'] = u.searchParams.get('sid');
+              }
+              if (n.network === 'ws') {
+                n['ws-opts'] = { path: u.searchParams.get('path') || '/' };
+                if (u.searchParams.get('host')) n['ws-opts'].headers = { Host: u.searchParams.get('host') };
+              } else if (n.network === 'grpc') {
+                n['grpc-opts'] = { 'grpc-service-name': u.searchParams.get('serviceName') || '' };
+              }
+              return n;
+            }
+            if (link.startsWith('vmess://')) {
+              let b64 = link.substring(8);
+              b64 += '='.repeat((4 - (b64.length % 4)) % 4);
+              const data = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
+              const n = { name: 'node', type: 'vmess', server: data.add, port: parseInt(data.port || 443), uuid: data.id, alterId: parseInt(data.aid || 0), cipher: 'auto', tls: data.tls === 'tls', network: data.net || 'tcp' };
+              if (data.sni) n.servername = data.sni;
+              if (n.network === 'ws') {
+                n['ws-opts'] = { path: data.path || '/' };
+                if (data.host) n['ws-opts'].headers = { Host: data.host };
+              }
+              return n;
+            }
+            if (link.startsWith('trojan://')) {
+              const u = new url.URL(link);
+              const n = { name: 'node', type: 'trojan', server: u.hostname, port: parseInt(u.port || '443'), password: u.username };
+              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
+              if (['1', 'true'].includes(u.searchParams.get('allowInsecure'))) n['skip-cert-verify'] = true;
+              return n;
+            }
+            return null;
+          }
 
-          sub_res = try_subconverter()
-          if sub_res:
-              print("✅ Subconverter 转换成功！")
-              config_str = "socks-port: 7891\nallow-lan: true\nmode: global\n" + sub_res
-          else:
-              print("⚠️ Subconverter 无法识别该节点，已自动切换至 Python 原生全协议解析器...")
-              node_obj = parse_raw_link(node_link)
-              if not node_obj:
-                  print("❌ 无法识别 NODE_LINK 的 URL 格式！")
-                  sys.exit(1)
-              
-              config_str = "socks-port: 7891\nallow-lan: true\nmode: global\nproxies:\n"
-              for k, v in node_obj.items():
-                  if isinstance(v, dict):
-                      config_str += f"  - {k}:\n"
-                      for subk, subv in v.items():
-                          config_str += f"      {subk}: {json.dumps(subv)}\n"
-                  else:
-                      if k == "name":
-                          config_str += f"  - name: {json.dumps(v)}\n"
-                      else:
-                          config_str += f"    {k}: {json.dumps(v)}\n"
-
-          with open("config.yaml", "w") as f:
-              f.write(config_str)
-          print("✅ Mihomo 配置文件 config.yaml 生成完毕！")
+          (async () => {
+            let configStr = 'socks-port: 7891\nallow-lan: true\nmode: global\n';
+            const subRes = await trySubconverter();
+            if (subRes) {
+              console.log('✅ Subconverter 转换成功！');
+              configStr += subRes;
+            } else {
+              console.log('⚠️ Subconverter 未返回有效配置，自动切换至 JS 原生节点解析器...');
+              const nodeObj = parseRawLink(nodeLink);
+              if (!nodeObj) {
+                console.error('❌ 无法识别 NODE_LINK 格式！');
+                process.exit(1);
+              }
+              configStr += 'proxies:\n';
+              for (const [k, v] of Object.entries(nodeObj)) {
+                if (typeof v === 'object' && v !== null) {
+                  configStr += `  - ${k}:\n`;
+                  for (const [subk, subv] of Object.entries(v)) {
+                    configStr += `      ${subk}: ${JSON.stringify(subv)}\n`;
+                  }
+                } else {
+                  if (k === 'name') configStr += `  - name: ${JSON.stringify(v)}\n`;
+                  else configStr += `    ${k}: ${JSON.stringify(v)}\n`;
+                }
+              }
+            }
+            fs.writeFileSync('config.yaml', configStr);
+            console.log('✅ Mihomo 配置文件 config.yaml 生成完毕！');
+          })();
           EOF
-          python3 parse_node.py
+          
+          # 执行节点解析
+          node parse_node.js
           
           # 5. 后台启动 Mihomo 代理内核
           nohup ./mihomo -d . -f config.yaml > mihomo.log 2>&1 &
