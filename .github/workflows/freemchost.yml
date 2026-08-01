@@ -1,4 +1,4 @@
-name: Freemchost Auto Renew Permanent
+name: Freemchost Auto Renew
 
 on:
   schedule:
