@@ -6,8 +6,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   browser-auto-renew:
@@ -17,201 +20,271 @@ jobs:
       NODE_LINK: ${{ secrets.NODE_LINK }}
 
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
-
-      - name: 安装 Node.js 环境
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 缓存 Playwright 浏览器依赖
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-v1
-
-      - name: 安装 Playwright、js-yaml 及依赖
+      - name: Validate NODE_LINK secret
         run: |
-          npm init -y
-          npm install playwright js-yaml
-          npx playwright install chromium --with-deps
+          set -Eeuo pipefail
+          if [[ -z "${NODE_LINK:-}" ]]; then
+            echo "::error::NODE_LINK is empty. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "::add-mask::$NODE_LINK"
+          echo "NODE_LINK is configured."
 
-      - name: ⚙️ 部署 Mihomo 代理内核 (双引擎全协议支持)
-        if: ${{ env.NODE_LINK != '' }}
+      - name: Install Mihomo and create local SOCKS5 proxy
         run: |
-          echo "🔄 识别到 NODE_LINK，开始部署本地代理转换层..."
-          
-          # 1. 保存节点链接并启动临时本地 HTTP 服务
-          echo "$NODE_LINK" > node.txt
-          python3 -m http.server 8080 &
-          
-          # 2. 下载并启动 Subconverter
-          wget -qO sub.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz
-          tar -xf sub.tar.gz
-          nohup ./subconverter/subconverter > sub.log 2>&1 &
-          sleep 2
-          
-          # 3. 下载并部署 Mihomo (Clash Meta) 内核
-          wget -qO mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.18.2/mihomo-linux-amd64-v1.18.2.gz
-          gunzip mihomo.gz
-          chmod +x mihomo
-          
-          # 4. 生成 Node.js 节点解析脚本
-          cat << 'EOF' > parse_node.js
-          const fs = require('fs');
-          const http = require('http');
-          const url = require('url');
-          const yaml = require('js-yaml');
+          set -Eeuo pipefail
 
-          const nodeLink = (process.env.NODE_LINK || '').trim();
-
-          async function trySubconverter() {
-            return new Promise((resolve) => {
-              http.get('http://127.0.0.1:25500/sub?target=clash&url=http://127.0.0.1:8080/node.txt&insert=false', (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                  if (data.includes('proxies:') && data.includes('name:')) {
-                    resolve(data);
-                  } else {
-                    resolve(null);
-                  }
-                });
-              }).on('error', () => resolve(null));
-            });
+          cleanup_on_error() {
+            status=$?
+            if [[ $status -ne 0 ]]; then
+              echo "----- Mihomo log -----"
+              sed -E \
+                -e 's#(uuid: )[A-Za-z0-9-]+#\1***#g' \
+                -e 's#(password: ).*#\1***#g' \
+                -e 's#(public-key: ).*#\1***#g' \
+                mihomo.log 2>/dev/null || true
+            fi
+            exit "$status"
           }
+          trap cleanup_on_error EXIT
 
-          function parseRawLink(link) {
-            link = link.trim();
-            if (link.startsWith('socks5://') || link.startsWith('socks://')) {
-              const u = new url.URL(link);
-              return { name: 'node', type: 'socks5', server: u.hostname, port: parseInt(u.port || '1080'), username: u.username || '', password: u.password || '' };
-            }
-            if (link.startsWith('hysteria2://') || link.startsWith('hy2://')) {
-              const u = new url.URL(link.replace('hy2://', 'hysteria2://'));
-              const pwd = u.username || (u.pathname || '').replace(/^\/\//, '').split('@')[0].split(':')[0];
-              const n = { name: 'node', type: 'hysteria2', server: u.hostname, port: parseInt(u.port || '443'), password: pwd };
-              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
-              if (['1', 'true'].includes(u.searchParams.get('insecure'))) n['skip-cert-verify'] = true;
-              return n;
-            }
-            if (link.startsWith('tuic://')) {
-              const u = new url.URL(link);
-              const uinfo = (u.username || '').split(':');
-              const n = { name: 'node', type: 'tuic', server: u.hostname, port: parseInt(u.port || '443'), uuid: uinfo[0], password: uinfo[1] || '', 'congestion-controller': u.searchParams.get('congestion_control') || 'bbr' };
-              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
-              if (['1', 'true'].includes(u.searchParams.get('insecure'))) n['skip-cert-verify'] = true;
-              return n;
-            }
-            if (link.startsWith('vless://')) {
-              const u = new url.URL(link);
-              const sec = u.searchParams.get('security') || '';
-              const n = { name: 'node', type: 'vless', server: u.hostname, port: parseInt(u.port || '443'), uuid: u.username, tls: ['tls', 'reality'].includes(sec), network: u.searchParams.get('type') || 'tcp' };
-              if (u.searchParams.get('sni')) n.servername = u.searchParams.get('sni');
-              if (u.searchParams.get('fp')) n['client-fingerprint'] = u.searchParams.get('fp');
-              if (sec === 'reality') {
-                n['reality-opts'] = { 'public-key': u.searchParams.get('pbk') || '' };
-                if (u.searchParams.get('sid')) n['reality-opts']['short-id'] = u.searchParams.get('sid');
-              }
-              if (n.network === 'ws') {
-                n['ws-opts'] = { path: u.searchParams.get('path') || '/' };
-                if (u.searchParams.get('host')) n['ws-opts'].headers = { Host: u.searchParams.get('host') };
-              } else if (n.network === 'grpc') {
-                n['grpc-opts'] = { 'grpc-service-name': u.searchParams.get('serviceName') || '' };
-              }
-              return n;
-            }
-            if (link.startsWith('vmess://')) {
-              let b64 = link.substring(8);
-              b64 += '='.repeat((4 - (b64.length % 4)) % 4);
-              const data = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8'));
-              const n = { name: 'node', type: 'vmess', server: data.add, port: parseInt(data.port || 443), uuid: data.id, alterId: parseInt(data.aid || 0), cipher: 'auto', tls: data.tls === 'tls', network: data.net || 'tcp' };
-              if (data.sni) n.servername = data.sni;
-              if (n.network === 'ws') {
-                n['ws-opts'] = { path: data.path || '/' };
-                if (data.host) n['ws-opts'].headers = { Host: data.host };
-              }
-              return n;
-            }
-            if (link.startsWith('trojan://')) {
-              const u = new url.URL(link);
-              const n = { name: 'node', type: 'trojan', server: u.hostname, port: parseInt(u.port || '443'), password: u.username };
-              if (u.searchParams.get('sni')) n.sni = u.searchParams.get('sni');
-              if (['1', 'true'].includes(u.searchParams.get('allowInsecure'))) n['skip-cert-verify'] = true;
-              return n;
-            }
-            return null;
-          }
+          echo "Installing the latest Mihomo release..."
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) asset_pattern='mihomo-linux-amd64-v[0-9].*\.gz$' ;;
+            aarch64|arm64) asset_pattern='mihomo-linux-arm64-v8-v[0-9].*\.gz$' ;;
+            *) echo "::error::Unsupported architecture: $arch"; exit 1 ;;
+          esac
 
-          (async () => {
-            const subRes = await trySubconverter();
-            if (subRes) {
-              console.log('✅ Subconverter 转换成功！');
-              fs.writeFileSync('config.yaml', 'socks-port: 7891\nallow-lan: true\nmode: global\n' + subRes);
-            } else {
-              console.log('⚠️ Subconverter 未返回有效配置，自动切换至 JS 原生节点解析器...');
-              const nodeObj = parseRawLink(nodeLink);
-              if (!nodeObj) {
-                console.error('❌ 无法识别 NODE_LINK 格式！');
-                process.exit(1);
-              }
-              
-              const configObj = {
-                'socks-port': 7891,
-                'allow-lan': true,
-                'mode': 'global',
-                'proxies': [ nodeObj ]
-              };
-              
-              fs.writeFileSync('config.yaml', yaml.dump(configObj));
-            }
-            console.log('✅ Mihomo 配置文件 config.yaml 生成完毕！');
-          })();
-          EOF
-          
-          # 执行节点解析
-          node parse_node.js
-          
-          # 5. 后台启动 Mihomo 代理内核
-          nohup ./mihomo -d . -f config.yaml > mihomo.log 2>&1 &
-          sleep 4
-          
-          # 6. 端口与连通性检查
-          if nc -z 127.0.0.1 7891; then
-            echo "✅ 代理内核启动完毕！已成功桥接本地 SOCKS5 代理端口: 127.0.0.1:7891"
-          else
-            echo "❌ 代理内核启动失败，7891 端口未响应！排查日志："
-            cat config.yaml
-            cat mihomo.log
+          release_json="$(curl -fsSL --retry 3 --retry-delay 2 \
+            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)"
+          download_url="$(printf '%s' "$release_json" | jq -r \
+            --arg pattern "$asset_pattern" \
+            '.assets[] | select(.name | test($pattern)) | .browser_download_url' | head -n1)"
+
+          if [[ -z "$download_url" || "$download_url" == "null" ]]; then
+            echo "::error::Unable to locate a compatible Mihomo release asset."
             exit 1
           fi
 
-      - name: 执行自动化续期脚本
-        env:
-          FREE_EMAIL: ${{ secrets.FREE_EMAIL }}
-          FREE_PASSWORD: ${{ secrets.FREE_PASSWORD }}
-          SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          PROXY_URL: ${{ secrets.PROXY_URL || (env.NODE_LINK != '' && 'socks5://127.0.0.1:7891' || '') }}
-        run: node renew.js
+          curl -fL --retry 3 --retry-delay 2 "$download_url" -o mihomo.gz
+          gzip -t mihomo.gz
+          gunzip -f mihomo.gz
+          chmod 0755 mihomo
 
-      - name: 上传运行截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Freemchost-Screenshots-${{ github.run_number }}
-          path: screenshots/*.png
-          if-no-files-found: ignore
-          retention-days: 7
+          cat > parse-node.js <<'NODEJS'
+          'use strict';
 
-      - name: 🧹 删除旧的工作流记录 (保留最新 1 条)
-        if: always()
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 0      
-          keep_minimum_runs: 1
+          const fs = require('fs');
+          const { URL } = require('url');
+
+          const rawLink = (process.env.NODE_LINK || '').trim();
+          if (!rawLink) throw new Error('NODE_LINK is empty');
+
+          const bool = value => ['1', 'true', 'yes'].includes(String(value || '').toLowerCase());
+          const int = (value, fallback) => {
+            const n = Number.parseInt(value || String(fallback), 10);
+            if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(`Invalid port: ${value}`);
+            return n;
+          };
+          const decode = value => decodeURIComponent(value || '');
+          const displayName = u => decode((u.hash || '').replace(/^#/, '')) || 'node';
+          const b64decode = value => {
+            const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+            return Buffer.from(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='), 'base64').toString('utf8');
+          };
+
+          function parseNode(link) {
+            if (/^vmess:\/\//i.test(link)) {
+              const data = JSON.parse(b64decode(link.slice(8)));
+              const node = {
+                name: data.ps || 'node', type: 'vmess', server: data.add,
+                port: int(data.port, 443), uuid: data.id,
+                alterId: Number.parseInt(data.aid || '0', 10), cipher: 'auto',
+                tls: data.tls === 'tls', network: data.net || 'tcp'
+              };
+              if (data.sni) node.servername = data.sni;
+              if (data.fp) node['client-fingerprint'] = data.fp;
+              if (node.network === 'ws') {
+                node['ws-opts'] = { path: data.path || '/' };
+                if (data.host) node['ws-opts'].headers = { Host: data.host };
+              }
+              if (node.network === 'grpc') {
+                node['grpc-opts'] = { 'grpc-service-name': data.path || '' };
+              }
+              return node;
+            }
+
+            const normalized = link.replace(/^hy2:\/\//i, 'hysteria2://');
+            const u = new URL(normalized);
+            const scheme = u.protocol.toLowerCase();
+            const name = displayName(u);
+
+            if (scheme === 'vless:') {
+              const security = (u.searchParams.get('security') || '').toLowerCase();
+              const flow = u.searchParams.get('flow');
+              const node = {
+                name, type: 'vless', server: u.hostname, port: int(u.port, 443),
+                uuid: decode(u.username), tls: ['tls', 'reality'].includes(security),
+                network: u.searchParams.get('type') || 'tcp'
+              };
+              if (flow) node.flow = flow;
+              if (u.searchParams.get('sni')) node.servername = u.searchParams.get('sni');
+              if (u.searchParams.get('fp')) node['client-fingerprint'] = u.searchParams.get('fp');
+              if (bool(u.searchParams.get('allowInsecure'))) node['skip-cert-verify'] = true;
+
+              if (security === 'reality') {
+                const publicKey = u.searchParams.get('pbk');
+                if (!publicKey) throw new Error('VLESS Reality node is missing pbk/public-key');
+                node['reality-opts'] = { 'public-key': publicKey };
+                const shortId = u.searchParams.get('sid');
+                if (shortId) node['reality-opts']['short-id'] = shortId;
+              }
+              if (node.network === 'ws') {
+                node['ws-opts'] = { path: u.searchParams.get('path') || '/' };
+                if (u.searchParams.get('host')) node['ws-opts'].headers = { Host: u.searchParams.get('host') };
+              } else if (node.network === 'grpc') {
+                node['grpc-opts'] = { 'grpc-service-name': u.searchParams.get('serviceName') || '' };
+              }
+              return node;
+            }
+
+            if (scheme === 'trojan:') {
+              const node = {
+                name, type: 'trojan', server: u.hostname, port: int(u.port, 443),
+                password: decode(u.username)
+              };
+              if (u.searchParams.get('sni')) node.sni = u.searchParams.get('sni');
+              if (u.searchParams.get('type')) node.network = u.searchParams.get('type');
+              if (bool(u.searchParams.get('allowInsecure'))) node['skip-cert-verify'] = true;
+              return node;
+            }
+
+            if (scheme === 'hysteria2:') {
+              const node = {
+                name, type: 'hysteria2', server: u.hostname, port: int(u.port, 443),
+                password: decode(u.username || u.password)
+              };
+              if (u.searchParams.get('sni')) node.sni = u.searchParams.get('sni');
+              if (bool(u.searchParams.get('insecure'))) node['skip-cert-verify'] = true;
+              if (u.searchParams.get('obfs')) node.obfs = u.searchParams.get('obfs');
+              if (u.searchParams.get('obfs-password')) node['obfs-password'] = u.searchParams.get('obfs-password');
+              return node;
+            }
+
+            if (scheme === 'tuic:') {
+              const node = {
+                name, type: 'tuic', server: u.hostname, port: int(u.port, 443),
+                uuid: decode(u.username), password: decode(u.password),
+                'congestion-controller': u.searchParams.get('congestion_control') || 'bbr',
+                'udp-relay-mode': u.searchParams.get('udp_relay_mode') || 'native'
+              };
+              if (u.searchParams.get('sni')) node.sni = u.searchParams.get('sni');
+              if (bool(u.searchParams.get('allow_insecure'))) node['skip-cert-verify'] = true;
+              return node;
+            }
+
+            if (scheme === 'socks5:' || scheme === 'socks:') {
+              const node = {
+                name, type: 'socks5', server: u.hostname, port: int(u.port, 1080)
+              };
+              if (u.username) node.username = decode(u.username);
+              if (u.password) node.password = decode(u.password);
+              if (bool(u.searchParams.get('tls'))) node.tls = true;
+              return node;
+            }
+
+            if (scheme === 'ss:') {
+              let method, password, server, port;
+              if (u.hostname) {
+                const userInfo = b64decode(decode(u.username));
+                [method, password] = userInfo.split(/:(.*)/s, 2);
+                server = u.hostname;
+                port = int(u.port, 8388);
+              } else {
+                const decoded = b64decode(link.slice(5).split('#')[0]);
+                const match = decoded.match(/^([^:]+):(.+)@([^:]+):(\d+)$/s);
+                if (!match) throw new Error('Invalid Shadowsocks link');
+                [, method, password, server] = match;
+                port = int(match[4], 8388);
+              }
+              return { name, type: 'ss', server, port, cipher: method, password };
+            }
+
+            throw new Error(`Unsupported NODE_LINK protocol: ${scheme}`);
+          }
+
+          try {
+            const node = parseNode(rawLink);
+            for (const key of ['name', 'type', 'server', 'port']) {
+              if (node[key] === undefined || node[key] === '') throw new Error(`Parsed node is missing ${key}`);
+            }
+
+            const config = {
+              'socks-port': 7891,
+              'mixed-port': 7890,
+              'allow-lan': false,
+              mode: 'rule',
+              'log-level': 'info',
+              ipv6: false,
+              proxies: [node],
+              'proxy-groups': [{ name: 'PROXY', type: 'select', proxies: [node.name] }],
+              rules: ['MATCH,PROXY']
+            };
+
+            // JSON is valid YAML 1.2 and prevents indentation/list errors.
+            fs.writeFileSync('config.yaml', JSON.stringify(config, null, 2), { mode: 0o600 });
+            console.log(`Generated config for ${node.type} node: ${node.name}`);
+          } catch (error) {
+            console.error(`NODE_LINK parse failed: ${error.message}`);
+            process.exit(1);
+          }
+          NODEJS
+
+          node parse-node.js
+          ./mihomo -t -f config.yaml
+          nohup ./mihomo -d "$PWD" -f config.yaml > mihomo.log 2>&1 &
+          echo $! > mihomo.pid
+
+          ready=0
+          for _ in {1..20}; do
+            if nc -z 127.0.0.1 7891; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat mihomo.pid)" 2>/dev/null; then
+              echo "::error::Mihomo exited before opening the proxy port."
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo "::error::Mihomo did not open 127.0.0.1:7891 within 20 seconds."
+            exit 1
+          fi
+
+          {
+            echo 'ALL_PROXY=socks5h://127.0.0.1:7891'
+            echo 'all_proxy=socks5h://127.0.0.1:7891'
+            echo 'HTTP_PROXY=http://127.0.0.1:7890'
+            echo 'HTTPS_PROXY=http://127.0.0.1:7890'
+            echo 'http_proxy=http://127.0.0.1:7890'
+            echo 'https_proxy=http://127.0.0.1:7890'
+            echo 'NO_PROXY=127.0.0.1,localhost'
+            echo 'no_proxy=127.0.0.1,localhost'
+          } >> "$GITHUB_ENV"
+
+          trap - EXIT
+          echo "Local proxy is ready: SOCKS5 127.0.0.1:7891, mixed 127.0.0.1:7890"
+
+      - name: Verify outbound proxy
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --retry 3 --connect-timeout 10 --max-time 30 \
+            --proxy socks5h://127.0.0.1:7891 \
+            https://api.ipify.org
+          echo
+          echo "Proxy connectivity check passed."
+
+      # Put your Freemchost browser renewal step below this line.
+      # The HTTP_PROXY, HTTPS_PROXY and ALL_PROXY variables are already available.
