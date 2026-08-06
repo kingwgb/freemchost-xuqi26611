@@ -21,7 +21,7 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 扫除遮罩与干扰弹窗
+// 🛡️ 扫除干扰弹窗
 async function forceDismissPopups(page) {
   console.log('🛡️ 正在执行 DOM 级弹窗粉碎策略...');
   await page.keyboard.press('Escape');
@@ -29,14 +29,12 @@ async function forceDismissPopups(page) {
 
   await page.evaluate(() => {
     const allEls = Array.from(document.querySelectorAll('*'));
-    // 点击常规关闭按钮
     const targets = allEls.filter(el => 
       el.children.length === 0 && 
       ['maybe later', 'i need help'].includes(el.textContent.trim().toLowerCase())
     );
     targets.forEach(el => el.click());
 
-    // 移除干扰 Modal 容器
     const ideaHeader = allEls.find(el => el.textContent && el.textContent.includes('Got an idea to make FreeMCHost better'));
     if (ideaHeader) {
       let container = ideaHeader;
@@ -107,33 +105,78 @@ async function forceDismissPopups(page) {
 
     console.log('✅ 登录成功！当前 URL:', page.url());
 
-    const targetUrl = serverPageUrl || 'https://freemchost.com/app';
-    console.log('📂 正在直达服务器详情页:', targetUrl);
-    await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
-    console.log('📍 实际到达页面 URL:', page.url());
+    // 1. 优先进入控制台主页，模拟人手点击服务器卡片进入详情
+    console.log('📂 正在访问服务列表主页: https://freemchost.com/app');
+    await page.goto('https://freemchost.com/app', { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(3000);
+    await forceDismissPopups(page);
 
-    // 自动重试机制：解决页面偶发性加载不全或 "Couldn't load this server" 问题
-    for (let retry = 0; retry < 3; retry++) {
+    // 寻找并点击服务器卡片
+    console.log('🔍 正在定位服务器卡片...');
+    let cardClicked = false;
+    
+    // 如果环境变量指定了服务器 URL 且包含 UUID，提取 UUID 寻找链接
+    let targetUuid = '';
+    if (serverPageUrl && serverPageUrl.includes('/servers/')) {
+      targetUuid = serverPageUrl.split('/servers/')[1].trim();
+    }
+
+    if (targetUuid) {
+      const specificLink = page.locator(`a[href*="${targetUuid}"]`).first();
+      if (await specificLink.count() > 0) {
+        console.log(`👉 找到指定 UUID [${targetUuid}] 卡片，正在点击进入...`);
+        await specificLink.click();
+        cardClicked = true;
+      }
+    }
+
+    if (!cardClicked) {
+      console.log('👉 点击列表中的第一个服务器卡片...');
+      const firstServerLink = page.locator('a[href*="/app/servers/"]').first();
+      if (await firstServerLink.count() > 0) {
+        await firstServerLink.click();
+        cardClicked = true;
+      }
+    }
+
+    // 如果通过卡片点击没成功，后备使用 goto 访问
+    if (!cardClicked && serverPageUrl) {
+      console.log('⚠️ 未找到卡片，使用直达 URL 进入详情页:', serverPageUrl);
+      await page.goto(serverPageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+    }
+
+    console.log('📍 实际到达页面 URL:', page.url());
+    
+    // 2. 循环等待 API 响应及控制台面板加载
+    console.log('⏳ 等待服务器面板 API 加载数据...');
+    let loadedSuccess = false;
+    for (let i = 0; i < 5; i++) {
       await forceDismissPopups(page);
-
-      const hasRenewBtn = await page.evaluate(() => {
+      
+      const pageState = await page.evaluate(() => {
         const text = document.body.innerText || '';
-        return text.toLowerCase().includes('renew now');
+        return {
+          hasRenew: text.toLowerCase().includes('renew now'),
+          hasError: text.includes("Couldn't load this server") || text.includes("use of VPNs is not permitted")
+        };
       });
 
-      if (hasRenewBtn) {
-        console.log('✅ 成功检测到服务器详情及 [Renew now] 按钮！');
+      if (pageState.hasRenew) {
+        loadedSuccess = true;
+        console.log('✅ 服务器详情面板及 [Renew now] 按钮就绪！');
         break;
       }
 
-      console.log(`⏳ 第 ${retry + 1} 次尝试：页面未完全加载服务器组件，正在刷新重试...`);
-      await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+      if (pageState.hasError && i === 2) {
+        console.log('⚠️ 检测到页面组件未响应，进行一次局部刷新...');
+        await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      }
+
       await page.waitForTimeout(3000);
     }
 
-    // 1. 点击 [Renew now] 按钮
-    console.log('🔄 正在寻找并点击 [Renew now] 按钮...');
+    // 3. 寻找并触发 [Renew now] 点击
+    console.log('🔄 正在触发 [Renew now] 按钮点击...');
     let renewClicked = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       renewClicked = await page.evaluate(() => {
@@ -147,51 +190,44 @@ async function forceDismissPopups(page) {
       });
 
       if (renewClicked) {
-        console.log('👉 已成功点击 [Renew now] 按钮！');
+        console.log('👉 已成功触发 [Renew now] 点击！');
         break;
       }
       
-      console.log(`⏳ 第 ${attempt + 1} 次尝试未查找到按钮，再次扫除干扰弹窗...`);
       await forceDismissPopups(page);
       await page.waitForTimeout(2000);
     }
 
     if (!renewClicked) {
-      throw new Error('未能在页面找到 [Renew now] 按钮，页面可能未正常渲染。');
+      throw new Error('未能在页面找到 [Renew now] 按钮，FreeMCHost 界面数据未正常加载。');
     }
 
-    // 2. 等待 "Keep your server online" 弹窗，并精确点击 "48 hours" 选项
-    console.log('📋 正在等待续期选项弹窗...');
+    // 4. 等待 48 hours 弹窗并点击
+    console.log('📋 正在等待 48小时 续期弹窗...');
     await page.waitForTimeout(2000);
 
     let clicked48h = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       clicked48h = await page.evaluate(() => {
         const allEls = Array.from(document.querySelectorAll('*'));
-        // 查找包含 48 hours 文本的底层节点
+        // 查找精确的 48 hours 节点
         const targetText = allEls.find(el => 
           el.children.length === 0 && 
           el.textContent.trim().toLowerCase().includes('48 hours')
         );
 
         if (targetText) {
-          // 向上向上寻找到卡片容器节点并触发点击
-          let clickableParent = targetText;
+          // 向上检索找到对应的选项框容器并触发点击
+          let p = targetText;
           for (let i = 0; i < 5; i++) {
-            if (clickableParent.parentElement && clickableParent.parentElement !== document.body) {
-              clickableParent = clickableParent.parentElement;
-              // 触发卡片或容器的点击事件
-              if (clickableParent.tagName === 'BUTTON' || 
-                  clickableParent.getAttribute('role') === 'button' ||
-                  clickableParent.onclick ||
-                  (clickableParent.className && typeof clickableParent.className === 'string' && 
-                   (clickableParent.className.includes('border') || clickableParent.className.includes('card') || clickableParent.className.includes('rounded')))) {
-                clickableParent.click();
+            if (p.parentElement && p.parentElement !== document.body) {
+              p = p.parentElement;
+              if (p.tagName === 'BUTTON' || p.getAttribute('role') === 'button' || p.onclick) {
+                p.click();
                 return true;
               }
             }
           }
-          // 保底直接点击文本节点本身
           targetText.click();
           return true;
         }
@@ -199,25 +235,24 @@ async function forceDismissPopups(page) {
       });
 
       if (clicked48h) {
-        console.log('👉 已成功选择 [48 hours] 免费续期卡片！');
+        console.log('👉 成功选择 [48 hours] 选项！');
         break;
       }
-
       await page.waitForTimeout(1500);
     }
 
     if (!clicked48h) {
-      console.log('⚠️ DOM 层未找到 48h 选项，尝试使用 Playwright Locator 强行点击...');
+      console.log('⚠️ 尝试使用 Locator 强制点击 [48 hours]...');
       const hours48Option = page.locator('text=/48 hours/i').first();
       await hours48Option.waitFor({ state: 'visible', timeout: 10000 });
       await hours48Option.click({ force: true });
     }
 
-    // 3. 完成续期操作，保存截图并发送通知
+    // 5. 保存截图并发送 TG 通知
     await page.waitForTimeout(5000);
     await page.screenshot({ path: 'screenshots/renew_success.png', fullPage: true });
 
-    const successMsg = '🎉 Freemchost 服务器已成功选择 48小时 续期！';
+    const successMsg = '🎉 Freemchost 服务器已成功点击 48小时 续期！';
     console.log('✅ ' + successMsg);
     await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
