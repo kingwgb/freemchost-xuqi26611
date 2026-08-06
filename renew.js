@@ -1,8 +1,6 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
-const path = require('path');
 
-// 确保截图保存目录存在
 if (!fs.existsSync('screenshots')) {
   fs.mkdirSync('screenshots');
 }
@@ -23,40 +21,35 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 浏览器原生 JS 强行关/删干扰弹窗
+// 🛡️ 扫除遮罩与干扰弹窗
 async function forceDismissPopups(page) {
   console.log('🛡️ 正在执行 DOM 级弹窗粉碎策略...');
-  
-  // 1. 发送 Esc 键盘事件
   await page.keyboard.press('Escape');
   await page.waitForTimeout(500);
 
-  // 2. 注入 JS 在页面内部强行点击或删除弹窗
   await page.evaluate(() => {
-    // A. 寻找 "Maybe later" / "I need help" 并直接触发底层 click
     const allEls = Array.from(document.querySelectorAll('*'));
+    // 点击常规关闭按钮
     const targets = allEls.filter(el => 
       el.children.length === 0 && 
-      (el.textContent.trim().toLowerCase() === 'maybe later' || el.textContent.trim().toLowerCase() === 'i need help')
+      ['maybe later', 'i need help'].includes(el.textContent.trim().toLowerCase())
     );
     targets.forEach(el => el.click());
 
-    // B. 如果弹窗依然存在，直接从 DOM 中擦除 Got an idea 弹窗整个容器
+    // 移除干扰 Modal 容器
     const ideaHeader = allEls.find(el => el.textContent && el.textContent.includes('Got an idea to make FreeMCHost better'));
     if (ideaHeader) {
-      let modalContainer = ideaHeader;
-      // 向上寻找最外层 modal 节点
+      let container = ideaHeader;
       for (let i = 0; i < 5; i++) {
-        if (modalContainer.parentElement && modalContainer.parentElement !== document.body) {
-          modalContainer = modalContainer.parentElement;
+        if (container.parentElement && container.parentElement !== document.body) {
+          container = container.parentElement;
         }
       }
-      if (modalContainer && modalContainer !== document.body) {
-        modalContainer.remove(); // 强行移除节点
+      if (container && container !== document.body) {
+        container.remove();
       }
     }
   });
-
   await page.waitForTimeout(1000);
 }
 
@@ -92,7 +85,6 @@ async function forceDismissPopups(page) {
     locale: 'en-US'
   });
 
-  // 抹除自动化特征
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
@@ -115,25 +107,28 @@ async function forceDismissPopups(page) {
 
     console.log('✅ 登录成功！当前 URL:', page.url());
 
-    // 直达服务器详情页
     const targetUrl = serverPageUrl || 'https://freemchost.com/app';
     console.log('📂 正在直达服务器详情页:', targetUrl);
     await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 60000 });
     console.log('📍 实际到达页面 URL:', page.url());
     await page.waitForTimeout(3000);
 
-    // 1. 强行清理遮罩弹窗
+    // 检查代理 IP 是否被 FreeMCHost 拦截
+    const pageContent = await page.content();
+    if (pageContent.includes('use of VPNs is not permitted') || pageContent.includes("Couldn't load this server")) {
+      throw new Error('当前代理 IP 被 FreeMCHost 识别并拦截 ("The use of VPNs is not permitted")，无法加载服务器详情，请更换干净节点！');
+    }
+
+    // 1. 扫除干扰弹窗
     await forceDismissPopups(page);
 
-    // 2. 点击 [Renew now] 按钮（通过 JS 寻找并触发点击，免疫遮罩挡路）
+    // 2. 查找并点击 [Renew now] 按钮
     console.log('🔄 正在寻找并点击 [Renew now] 按钮...');
-    
-    // 如果一次点击没触发，做二次清洗与重试
     let renewClicked = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       renewClicked = await page.evaluate(() => {
         const allBtns = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
-        const target = allBtns.find(b => b.textContent && b.textContent.trim().toLowerCase().includes('renew now'));
+        const target = allBtns.find(b => b.textContent && b.textContent.trim().toLowerCase() === 'renew now');
         if (target) {
           target.click();
           return true;
@@ -142,11 +137,11 @@ async function forceDismissPopups(page) {
       });
 
       if (renewClicked) {
-        console.log('👉 已通过 JS 成功触发 [Renew now] 点击！');
+        console.log('👉 已成功触发 [Renew now] 按钮点击！');
         break;
       }
       
-      console.log(`⏳ 第 ${attempt + 1} 次尝试未查找到按钮，再次扫除干扰弹窗后重试...`);
+      console.log(`⏳ 第 ${attempt + 1} 次尝试未查找到按钮，再次扫除干扰弹窗...`);
       await forceDismissPopups(page);
       await page.waitForTimeout(2000);
     }
@@ -155,19 +150,52 @@ async function forceDismissPopups(page) {
       throw new Error('未能在页面找到 [Renew now] 按钮，请检查页面结构。');
     }
 
-    // 3. 等待真正的 48 hours 续期弹窗出现
+    // 3. 等待 "Keep your server online" 续期弹窗出现并点击 [48 hours]
     console.log('📋 正在等待 48小时 续期选择弹窗...');
-    const hours48Option = page.locator('text=/48 hours/i').first();
-    await hours48Option.waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForTimeout(2000);
 
-    console.log('👉 成功捕获续期弹窗！点击 [48 hours] 选项...');
-    await hours48Option.click({ force: true });
+    const clicked48h = await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll('*'));
+      // 寻找包含 "48 hours" 的文本节点
+      const targetText = allEls.find(el => 
+        el.children.length === 0 && 
+        el.textContent.trim().toLowerCase().includes('48 hours')
+      );
+      if (targetText) {
+        // 向上寻找该选项的外层可点击容器
+        let clickableParent = targetText;
+        for (let i = 0; i < 4; i++) {
+          if (clickableParent.parentElement && clickableParent.parentElement !== document.body) {
+            clickableParent = clickableParent.parentElement;
+            if (clickableParent.tagName === 'BUTTON' || 
+                clickableParent.getAttribute('role') === 'button' || 
+                clickableParent.className.includes('cursor-pointer') ||
+                clickableParent.className.includes('option') ||
+                clickableParent.className.includes('card')) {
+              clickableParent.click();
+              return true;
+            }
+          }
+        }
+        // 如果未定位到特定 class 属性，则直接点击外层容器
+        clickableParent.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!clicked48h) {
+      console.log('⚠️ DOM 定位未直接触发，尝试 Playwright Locator 强行点击 [48 hours]...');
+      const hours48Option = page.locator('text=/48 hours/i').first();
+      await hours48Option.waitFor({ state: 'visible', timeout: 15000 });
+      await hours48Option.click({ force: true });
+    }
 
     // 4. 等待响应并保存成功截图
     await page.waitForTimeout(5000);
     await page.screenshot({ path: 'screenshots/renew_success.png', fullPage: true });
 
-    const successMsg = '🎉 Freemchost 服务器已成功选择 48小时 续期！';
+    const successMsg = '🎉 Freemchost 服务器已成功点击 48小时 续期！';
     console.log('✅ ' + successMsg);
     await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
